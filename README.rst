@@ -14,6 +14,7 @@ Additional dependences:
 -----------------------
 
 tqdm
+lmfit
 
 *optional:* cupy (cupy is especially helpful for faster computations of
 in the case of long series with variable detector position angle like 

@@ -6,6 +6,8 @@ else:
     import cupy as cp
 import xara
 
+from kernel_cm import br, bo, vdg
+
 import xaosim
 from tqdm import  tqdm
 import matplotlib.pyplot as plt
@@ -230,7 +232,7 @@ def whitened_sadk_binary_match_map(self, gsz, gstep, adk_signal, W=None,deltas=N
         itparams = tqdm(superparams)
     else:
         itparams = superparams
-    signatures = np.array([self.get_sadk_signature(p, self.CWAVEL, verbose=False) for p in itparams])
+    signatures = np.array([self.get_sadk_signature(p, verbose=False) for p in itparams])
     
     if gpu:
         signaturesg = cp.asarray(signatures)
@@ -364,7 +366,7 @@ def gpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
         itparams = tqdm(superparams)
     else:
         itparams = superparams
-    signatures = np.array([self.get_sadk_signature(p, self.CWAVEL, verbose=False) for p in itparams])
+    signatures = np.array([self.get_sadk_signature(p, verbose=False) for p in itparams])
     
     signaturesg = cp.asarray(signatures, dtype=thetype)
     
@@ -395,6 +397,104 @@ def gpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
                rhos.reshape(gsz,gsz), thetas.reshape(gsz,gsz))
 
 xara.KPO.gpu_sadk_binary_match_map = gpu_sadk_binary_match_map
+
+def cpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
+                                   verbose=False, project = True, cref=1000, full_output=False,
+                                   thetype=np.float64):
+    """ Produces a 2D-map showing where the best binary fit occurs
+
+    Computes the dot product between the kp_signal and a grid (x,y) grid of 
+    possible positions for the companion, for a pre-set contrast.
+
+    Parameters:
+    ----------
+    - gsz       : grid size (gsz x gsz)
+    - gstep     : grid step in mas
+    - adk_signal: a 2d array containing the kernel-phase vectors
+    - cref      : reference contrast (optional, default = 1000)
+    - W         : a cube of whitening matrices for the data 
+    - deltas    : An array containing the values of field rotation angles
+    - thetype   : the cupy dtype for the GPU matrices (np.float64 or np.float32 recommended)
+
+    Remarks:
+    -------
+    In the high-contrast regime, the amplitude is proportional to the
+    companion brightness ratio.
+    ---------------------------------------------------------------
+    """
+    #import cupy as cp
+    #A few assertions:
+    
+
+    if W is not None:
+        print("W is not necessary! This function now uses a whitening L matrix kpo.Mp")
+        return 1
+    if deltas.shape[0] != adk_signal.shape[0]:
+        print("Bad kernel shape")
+        return 1
+    if deltas is None:
+        print("Error: need a rotation angle")
+        return 1
+    
+    nf = deltas.shape[0]
+    if project:
+        L = self.Mp
+    else: 
+        print("This function is designed to project")
+        return 1
+
+    
+    #building a grid
+    a = np.vstack(adk_signal.flatten())
+    lwadk_signal = self.Mp.dot(a)
+
+    xs, ys = np.meshgrid(np.arange(gsz), np.arange(gsz))
+    ds = np.round(gsz/2)
+    cpform = ((ys-ds)*gstep).flatten() + 1j*((-(xs-ds))*gstep).flatten()
+    rhos, thetas = np.abs(cpform), np.angle(cpform)*180./np.pi
+    thetasdeltas = thetas[:, None] + deltas[None, :]
+    dparams = np.array([np.array([0,deltas[i],0]) for i in range(nf)])
+    params = np.array([rhos, thetas, cref*np.ones_like(rhos)]).T
+
+    #Creating the larger array of parameters for individual observations
+    superparams = params[:, None, :] + dparams[None, :,:]
+    #Retrieving the corresponding model signatures
+    if verbose:
+        print("Getting the model observables")
+        sys.stdout.flush()
+        itparams = tqdm(superparams)
+    else:
+        itparams = superparams
+    signatures = np.array([self.get_sadk_signature(p, verbose=False) for p in itparams])
+    
+    signaturesg = signatures.astype(thetype)
+    
+    if verbose:
+        print("Projection and reduction")
+        sys.stdout.flush()
+        pixels = tqdm(range(rhos.shape[0]))
+    else:
+        pixels = range(rhos.shape[0])
+    projectedth = []
+    crit = []
+    wsigss = []
+    for pix in pixels:
+        wsigss.append(signaturesg[pix].flatten())
+    wsigss = np.vstack(wsigss)
+    pixelthproj = self.Mp.dot(wsigss.T)
+    crit = np.squeeze(pixelthproj.T.dot(lwadk_signal)) / np.squeeze(np.linalg.norm(pixelthproj, axis=0))
+
+    print("crit",crit.shape)
+    print("gsz", gsz)
+    print("pixelthproj", pixelthproj.shape)
+    print("lwadk",lwadk_signal.shape)
+    if not full_output:
+        return(crit.reshape(gsz, gsz))
+    else :
+        return(crit.reshape(gsz,gsz), np.linalg.norm(pixelthproj, axis=0).reshape(gsz,gsz),
+               rhos.reshape(gsz,gsz), thetas.reshape(gsz,gsz))
+
+xara.KPO.cpu_sadk_binary_match_map = cpu_sadk_binary_match_map
 
 def Sglr(y, xhat):
     """A simple function to return the GLRt statistic (Ceau et al. 2019)
@@ -666,9 +766,6 @@ def intro_companion(image, params, pscale):
     return image + compagim / c
 
 
-def add_poisson(image):
-    noised = np.random.normal(image, np.sqrt(image))
-    return noised
 
 #Averaging visibilities
 #cubestack = (cviss +np.roll(cviss, -1 ,axis=0) + np.roll(cviss, -2, axis=0)+
