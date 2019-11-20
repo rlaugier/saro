@@ -6,17 +6,21 @@ else:
     import cupy as cp
 import xara
 
-from kernel_cm import br, bo, vdg
+from kernel_cm import br, bo, vdg, bbr
 
 import xaosim
 from tqdm import  tqdm
 import matplotlib.pyplot as plt
 
 import scipy.sparse as sparse
+from scipy.linalg import sqrtm
 
 from xara import fft, ifft, shift
 
 import detection_maps as dmap
+"""
+The functions uses the wavelength provided by KPO.CWAVEL
+"""
 
 
 # Utility for phase optimization
@@ -37,7 +41,13 @@ def get_kernel_signature(self, params):
     The result is given (end - start)
     Parameters:
     -----------
-    - params
+    - params   : A parameter vector for a binary model
+                    - p[0] = sep (mas)
+                    - p[1] = PA (deg) E of N.
+                    - p[2] = contrast ratio (primary/secondary)
+                    optional:
+                    - p[3] = angular size of primary (mas)
+                    - p[4] = angular size of secondary (mas)
     """
     cvis = self.get_cvis(params)
     Phi = np.angle(cvis)
@@ -164,108 +174,6 @@ def whitened_adk_binary_match_map(self, gsz, gstep, adk_signal,W=None,dtheta=Non
                rhos.reshape(gsz,gsz), thetas.reshape(gsz,gsz))
 xara.KPO.whitened_adk_binary_match_map = whitened_adk_binary_match_map
 
-    
-def whitened_sadk_binary_match_map(self, gsz, gstep, adk_signal, W=None,deltas=None,
-                                   verbose=True, project = True, cref=1000, full_output=False,
-                                   gpu=False):
-    """ Produces a 2D-map showing where the best binary fit occurs
-
-    Computes the dot product between the kp_signal and a grid (x,y) grid of 
-    possible positions for the companion, for a pre-set contrast.
-
-    Parameters:
-    ----------
-    - gsz       : grid size (gsz x gsz)
-    - gstep     : grid step in mas
-    - adk_signal: a 2d array containing the kernel-phase vectors
-    - cref      : reference contrast (optional, default = 1000)
-    - W         : a cube of whitening matrices for the data 
-    - deltas    : An array containing the values of field rotation angles
-
-    Remarks:
-    -------
-    In the high-contrast regime, the amplitude is proportional to the
-    companion brightness ratio.
-    ---------------------------------------------------------------
-    """
-    if gpu: import cupy as cp
-    #A few assertions:
-    if W.shape[0] != deltas.shape[0]:
-        print("Bad number of frames")
-        return 1
-    if W.shape[1] != self.kpi.nbkp:
-        print("Bad kernel shape")
-        return 1
-    if deltas.shape[0] != adk_signal.shape[0]:
-        print("Bad kernel shape")
-        return 1
-    if deltas is None:
-        print("Error: need a rotation angle")
-        return 1
-    
-    nf = deltas.shape[0]
-    
-    xp = cupy.get_array_module(thekpo.Mp)
-    Lg = thekpo.Mp
-    
-    sadk_signal =adk_signal.flat
-    
-    
-
-    #building a grid
-    lwadk_signal = Lg.dot(sadk_signal)
-
-    xs, ys = np.meshgrid(np.arange(gsz), np.arange(gsz))
-    ds = np.round(gsz/2)
-    cpform = ((ys-ds)*gstep).flatten() + 1j*((-(xs-ds))*gstep).flatten()
-    rhos, thetas = np.abs(cpform), np.angle(cpform)*180./np.pi
-    thetasdeltas = thetas[:, None] + deltas[None, :]
-    dparams = np.array([np.array([0,deltas[i],0]) for i in range(nf)])
-    params = np.array([rhos, thetas, cref*np.ones_like(rhos)]).T
-
-    #Creating the larger array of parameters for individual observations
-    superparams = params[:, None, :] + dparams[None, :,:]
-    #Retrieving the corresponding model signatures
-    if verbose:
-        print("Getting the model observables")
-        sys.stdout.flush()
-        itparams = tqdm(superparams)
-    else:
-        itparams = superparams
-    signatures = np.array([self.get_sadk_signature(p, verbose=False) for p in itparams])
-    
-    if gpu:
-        signaturesg = cp.asarray(signatures)
-    if verbose:
-        print("Projection and reduction")
-        sys.stdout.flush()
-        pixels = tqdm(range(rhos.shape[0]))
-    else:
-        pixels = range(rhos.shape[0])
-    projectedth = []
-    crit = []
-    if gpu:
-        for pix in pixels:
-            thesigs = cp.array(signatures[pix].flatten())
-            pixelthproj = Lg.dot(thesigs)
-            projectedth.append(pixelthproj)
-            pixelcrit = cp.asnumpy(lwadk_signal.T.dot(pixelthproj) / cp.linalg.norm(pixelthproj)).sum()
-            crit.append(pixelcrit)
-    else :
-        for pix in pixels:
-            thesigs = np.array(signatures[pix].flatten())
-            pixelthproj = L.dot(thesigs)
-            projectedth.append(pixelthproj)
-            pixelcrit = lwadk_signal.T.dot(pixelthproj) / np.linalg.norm(pixelthproj)
-            crit.append(pixelcrit)
-    projectedth = np.array(projectedth)
-    crit = np.array(crit)
-    if not full_output:
-        return(crit.reshape(gsz, gsz))
-    else :
-        return(crit.reshape(gsz,gsz), np.linalg.norm(projectedth, axis=1).reshape(gsz,gsz),
-               rhos.reshape(gsz,gsz), thetas.reshape(gsz,gsz))
-xara.KPO.whitened_sadk_binary_match_map = whitened_sadk_binary_match_map
 
     
 def build_L_matrix(self, nf, crop=True, giveUf=True):
@@ -280,12 +188,13 @@ def build_L_matrix(self, nf, crop=True, giveUf=True):
 xara.KPO.build_L_matrix = build_L_matrix
 
 
-def get_adk_residual(self, params, y, W, wl, dtheta):
-    kappa = get_adk_signature(self, np.array([params["rho"],params["theta"],params["contrast"]]), wl, dtheta, verbose=False)
-    residual = W.dot(kappa) - y
+def get_adk_residual(self, params, y, dtheta):
+    pparams = np.array([np.array([params["rho"],params["theta"],params["contrast"]]) + np.array([0, theta, 0]) for theta in dtheta])
+    kappa = get_sadk_signature(self, pparams, verbose=False)
+    residual = self.Mp.dot(kappa.flatten()) - y
     return residual
 def get_kpd_residual(self, params, y, W, wl, dtheta):
-    kappa = get_adk_signature(self, np.array([params["rho"],params["theta"],params["contrast"]]), wl, dtheta, verbose=False)
+    kappa = get_sadk_signature(self, np.array([params["rho"],params["theta"],params["contrast"]]), dtheta, verbose=False)
     residual = W.dot(kappa) - y
     return residual
 
@@ -340,8 +249,7 @@ def gpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
             return 1
         L = self.Mp
     else: 
-        print("This function is designed to project")
-        return 1
+        L = np.identity(adk_signal.flatten().shape[0])
 
     
     adk_signalg = cp.array(adk_signal)
@@ -387,9 +295,9 @@ def gpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
 
     projectedth = pixelthproj
     crit = pixelcrit
-    print("crit",crit.shape)
-    print("gsz", gsz)
-    print("pixelthproj", pixelthproj.shape)
+    #print("crit",crit.shape)
+    #print("gsz", gsz)
+    #print("pixelthproj", pixelthproj.shape)
     if not full_output:
         return(crit.reshape(gsz, gsz))
     else :
@@ -399,7 +307,7 @@ def gpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
 xara.KPO.gpu_sadk_binary_match_map = gpu_sadk_binary_match_map
 
 def cpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
-                                   verbose=False, project = True, cref=1000, full_output=False,
+                                   verbose=False, project=True, cref=1000, full_output=False,
                                    thetype=np.float64):
     """ Produces a 2D-map showing where the best binary fit occurs
 
@@ -429,24 +337,27 @@ def cpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
     if W is not None:
         print("W is not necessary! This function now uses a whitening L matrix kpo.Mp")
         return 1
-    if deltas.shape[0] != adk_signal.shape[0]:
-        print("Bad kernel shape")
-        return 1
+#    if deltas.shape[0] != adk_signal.shape[0]:
+#        print("Bad kernel shape")
+#        return 1
     if deltas is None:
         print("Error: need a rotation angle")
         return 1
     
     nf = deltas.shape[0]
+    L = self.Mp
+    
+    a = np.vstack(adk_signal.flatten())
     if project:
-        L = self.Mp
+        if len(self.Mp.shape)==3:
+            np.array([self.Mp[i].dot(adk_signal[i]) for i in range(self.Mp.shape[0])])
+        else:
+            lwadk_signal = self.Mp.dot(a)
     else: 
-        print("This function is designed to project")
-        return 1
+        lwadk_signal = a
 
     
     #building a grid
-    a = np.vstack(adk_signal.flatten())
-    lwadk_signal = self.Mp.dot(a)
 
     xs, ys = np.meshgrid(np.arange(gsz), np.arange(gsz))
     ds = np.round(gsz/2)
@@ -484,10 +395,10 @@ def cpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
     pixelthproj = self.Mp.dot(wsigss.T)
     crit = np.squeeze(pixelthproj.T.dot(lwadk_signal)) / np.squeeze(np.linalg.norm(pixelthproj, axis=0))
 
-    print("crit",crit.shape)
-    print("gsz", gsz)
-    print("pixelthproj", pixelthproj.shape)
-    print("lwadk",lwadk_signal.shape)
+    #print("crit",crit.shape)
+    #print("gsz", gsz)
+    #print("pixelthproj", pixelthproj.shape)
+    #print("lwadk",lwadk_signal.shape)
     if not full_output:
         return(crit.reshape(gsz, gsz))
     else :
@@ -500,13 +411,25 @@ def Sglr(y, xhat):
     """A simple function to return the GLRt statistic (Ceau et al. 2019)
     
     """
-    St = 2*y.T.dot(xhat) - xhat.T.dot(xhat)
+    St = 2*np.squeeze(y).T.dot(xhat) - xhat.T.dot(xhat)
     return St
 xara.Sglr = Sglr
 
 from lmfit import minimize, Parameters, report_errors, Minimizer
 
-def global_GLR(self, signal, W=None, dtheta=None, n=10, N=1000, mode="cmap"):
+def define_roi(self, verbose=True):
+    
+    lengths = np.sqrt(self.kpi.UVC[:,0]**2 + self.kpi.UVC[:,1]**2)
+    D = np.max(lengths)
+    b = np.min(lengths)
+    self.rhomin = 0.5*self.CWAVEL / D * 180/np.pi * 3600 * 1000
+    self.rhomax = 0.5*self.CWAVEL / b * 180/np.pi * 3600 * 1000
+    gstep = self.rhomin
+    resol = np.round((self.rhomax/gstep) *2).astype(np.int16)
+    return resol, gstep
+xara.KPO.define_roi = define_roi
+
+def global_GLR(self, signal, W=None, dtheta=None, n=10, N=1000, mode="cmap", verbose=True):
     """Computes a complete GLR detection test on provided data
   
     Parameters:
@@ -526,26 +449,21 @@ def global_GLR(self, signal, W=None, dtheta=None, n=10, N=1000, mode="cmap"):
     use of a bfilter in KPO.
     """
     if W is None:
-        print("No whitening matrix provided: building it from the kpo.kp_cov")
+        print("Matrix should be provided in KPO.Mp")
         try:
-            kpcov = self.kp_cov
+            W = self.Mp
         except:
             print("You must provide a covariance matrix")
             return 1.
-        kernelcov = self.kpi.KPM.dot(self.kp_cov).dot(self.kpi.KPM.T)
-        W = sqrtm(np.linalg.inv(kernelcov))
     #Whitening the provided data:
-    y = W.dot(signal)
+    y = W.dot(signal.flatten())
     #First step is to define explored space.
-    lengths = np.sqrt(self.kpi.UVC[:,0]**2 + self.kpi.UVC[:,1]**2)
-    D = np.max(lengths)
-    b = np.min(lengths)
-    self.rhomin = 0.5*self.CWAVEL / D * 180/np.pi * 3600 * 1000
-    self.rhomax = 0.5*self.CWAVEL / b * 180/np.pi * 3600 * 1000
-    print("rho min",self.rhomin)
-    print("rho max", self.rhomax)
+    resol, gstep = self.define_roi()
+    if verbose:
+        print("rho min",self.rhomin)
+        print("rho max", self.rhomax)
     #Then we can get the test statistic on our data:
-    Sglry, phat = self.Sglr_fitandget(y=y,W=W,dtheta=dtheta,mode=mode, showmap=True)
+    Sglry, phat = self.Sglr_fitandget(kappa=signal,W=W,dtheta=dtheta,mode=mode, showmap=verbose)
     print("The statistcs value Sglrb = %f"%(Sglry))
     print(phat)
     #Now we want to evaluate the Pfa (Pvalue) of this result.
@@ -554,8 +472,8 @@ def global_GLR(self, signal, W=None, dtheta=None, n=10, N=1000, mode="cmap"):
     n_fp = 0
     N_done = 0
     for i in tqdm(np.arange(N)):
-        ymc = np.random.normal(loc=0.0,scale=1.0,size=self.kpi.nbkp)
-        S, phat = self.Sglr_fitandget(y=ymc,W=W, dtheta=dtheta, mode=mode, showmap=(N_done<10))
+        print("dtheta", dtheta)
+        S, phat = self.Sglr_fitandget(kappa=None,W=W, dtheta=dtheta, mode=mode, showmap=(N_done<10))
         #print("S shape", S.shape)
         #print(phat)
         Sglrymc.append(S)
@@ -577,7 +495,7 @@ def global_GLR(self, signal, W=None, dtheta=None, n=10, N=1000, mode="cmap"):
     return Sglry, Sglrymc, phat
     
     
-def Sglr_fitandget(self, y=None, W=None, dtheta=None, mode="cmap", showmap="False"):
+def Sglr_fitandget(self, kappa=None, W=None, dtheta=None, mode="cmap", showmap="False"):
     """Computes the GLRb statistic of a whitened signal
     Returns the statistc as well as the fitted parameters in the
     lmfit Parameters format
@@ -594,27 +512,54 @@ def Sglr_fitandget(self, y=None, W=None, dtheta=None, mode="cmap", showmap="Fals
     """
     if mode == "cmap":
         #We build a colinearity map to get a starting point
-        Winv = np.linalg.inv(W)
-        totsize = int(2 * self.rhomax / self.rhomin)
-        gstep = self.rhomin
-        gsz = totsize
-        if dtheta is not None:
-            cmap, norm, rhos, thetas = self.whitened_adk_binary_match_map(gsz, 
-                                                      gstep, Winv.dot(y), W=W,dtheta=dtheta,
-                                                      cref=1000, full_output=True)
+        if kappa is None:
+            y = np.random.normal(loc=0.0,scale=1.0,size=(self.Mp.shape[0]))
         else :
-            cmap, norm, rhos, thetas = self.whitened_kpd_binary_match_map(gsz, 
-                                                      gstep, Winv.dot(y), W=W,dtheta=dtheta,
+            y = W.dot(kappa.flatten())
+        gstep = self.rhomin
+        gsz = np.round(2 * (self.rhomax/gstep)).astype(np.int16)
+        if dtheta is not None:
+            cmap, norm, rhos, thetas = self.cpu_sadk_binary_match_map(gsz, 
+                                                      gstep, np.array([y]), W=None,deltas=dtheta,
+                                                      cref=1000, full_output=True, project=False)
+        else :
+            cmap, norm, rhos, thetas = self.cpu_sadk_binary_match_map(gsz, 
+                                                      gstep, np.array([kappa]), W=W,deltas=dtheta,
                                                       cref=1000, full_output=True)
         cmap = cmap * (rhos<=self.rhomax) * (rhos>=self.rhomin)
         loc = np.unravel_index(np.nanargmax(cmap),cmap.shape)
 
         startparams = np.array([rhos[loc], thetas[loc], 1000 * 1 / (cmap[loc] /
                          norm[loc])])
-                                
+
+        
+        params = Parameters()
+        params.add("rho", value=startparams[0], min=self.rhomin, max=self.rhomax)
+        params.add("theta", value=startparams[1])
+        params.add("contrast", value=startparams[2])
+        if dtheta is not None:
+            soluce = minimize(self.get_adk_residual,params,
+                            args=(np.array([y]), dtheta),
+                            full_output=True)
+        else:
+            soluce = minimize(self.get_kpd_residual,params,
+                            args=(y, W, self.CWAVEL,dtheta),
+                            full_output=True)
+        #paramshat = np.array([soluce.params["rho"],
+        #                     soluce.params["theta"],
+        #                     soluce.params["contrast"]])
+        paramshat = soluce.params
+        
         if showmap:
+            hs =  gsz/2*gstep
             plt.figure()
-            plt.imshow(cmap)
+            plt.imshow(cmap, cmap=vdg, extent=[-hs,+hs,-hs,+hs])
+            plt.scatter(-params["rho"].value*np.sin(params["theta"].value*np.pi/180),
+                       +params["rho"].value*np.cos(params["theta"].value*np.pi/180),
+                        marker="x", c="w", s=200)
+            plt.scatter(-paramshat["rho"].value*np.sin(paramshat["theta"].value*np.pi/180),
+                       +paramshat["rho"].value*np.cos(paramshat["theta"].value*np.pi/180),
+                        marker="+", c="r", s=200)
             plt.title("cmap")
             plt.show()
             #plt.figure()
@@ -626,34 +571,17 @@ def Sglr_fitandget(self, y=None, W=None, dtheta=None, mode="cmap", showmap="Fals
             #print("norm",norm.shape)
             #print("rhos",rhos.shape)
             #print("thetas",thetas.shape)
-
-        params = Parameters()
-        params.add("rho", value=startparams[0], min=self.rhomin, max=self.rhomax)
-        params.add("theta", value=startparams[1])
-        params.add("contrast", value=startparams[2])
-        if dtheta is not None:
-            soluce = minimize(self.get_adk_residual,params,
-                            args=(y, W, self.CWAVEL,dtheta),
-                            full_output=True)
-        else:
-            soluce = minimize(self.get_kpd_residual,params,
-                            args=(y, W, self.CWAVEL,dtheta),
-                            full_output=True)
-        #paramshat = np.array([soluce.params["rho"],
-        #                     soluce.params["theta"],
-        #                     soluce.params["contrast"]])
-        paramshat = soluce.params
-        if showmap:
             print(startparams)
             print(np.array([paramshat["rho"].value, paramshat["theta"].value, paramshat["contrast"].value]))
             
         if dtheta is not None:
-            xhat = W.dot(get_adk_signature(self, np.array([paramshat["rho"], paramshat["theta"], paramshat["contrast"]]) ,
-                                        wl, dtheta, verbose=False))
+            pphat = np.array([[paramshat["rho"], paramshat["theta"] + atheta, paramshat["contrast"]] for atheta in dtheta])
+            xhat = W.dot(get_sadk_signature(self,
+                   pphat, verbose=False).flatten())
         else: 
             xhat = W.dot(get_kernel_signature(self, np.array([paramshat["rho"], paramshat["theta"], paramshat["contrast"]]) ,
-                                        wl, dtheta, verbose=False))
-        Sglry = xara.Sglr(y,xhat)
+                                        dtheta, verbose=False))
+        Sglry = xara.Sglr(np.array([y]),xhat)
     return Sglry, paramshat
 
 class kpd_fitter(object):
@@ -688,16 +616,6 @@ class kpd_fitter(object):
 
 xara.KPO.global_GLR = global_GLR
 xara.KPO.Sglr_fitandget = Sglr_fitandget
-
-
-def getkpcovana(psf, thekpo, m2pix, mask, ron=1.):
-    varim = ((psf + ron**2 * np.ones_like(psf)) * mask)
-    thekpo.create_UVP_cov_matrix(varim, option="REAL", m2pix=m2pix)
-    
-    theAnaSigma = thekpo.kpi.KPM.dot(thekpo.kp_cov).dot(thekpo.kpi.KPM.T)
-    #plotim(theAnaSigma, name="Analytical")
-    normalizedSigma = theAnaSigma * 0.66 
-    return normalizedSigma
 
 def shifter(im0,vect, buildmask = True, sg_rad=40.0, verbose=False, nbit=10):
 
