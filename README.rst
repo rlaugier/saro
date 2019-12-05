@@ -1,14 +1,14 @@
 SARO: a python package for Statistical Analysis of Robust Observables
 =====================================================================
 
-SARO is a companion to XARA by Frantz Martinache (https://github.com/fmartinache/xara). It adds post-processing functionnality to
-the package:
+SARO is a companion to XARA by Frantz Martinache (https://github.com/fmartinache/xara).
+It adds post-processing functionnality to the package:
 
 In particular:
 
 - Colinearity maps: Laugier et al. (2019), 
 - Energy detector sensitivity maps and GLR detection: Ceau et al. (2019)
-- Angular Differential Kernel (ADK): Laugier et al. (submitted)
+- Angular Differential Kernel (ADK): Laugier et al. (submitted )
 
 Additional dependences:
 -----------------------
@@ -24,3 +24,11 @@ Usage
 -----
 
 The package is designed to be imported along with XARA.
+
+This is not a stable release. Interfaces of methods will evolve.
+
+
+Acknowledgement
+----------------
+
+SARO is a development carried out in the context of the KERNEL project. KERNEL has received funding from the European Research Council (ERC) under the European Union's Horizon 2020 research and innovation program (grant agreement CoG - 683029). For more information about the KERNEL project, visit: http://frantzmartinache.eu/index.php/category/kernel/
