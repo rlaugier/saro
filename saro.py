@@ -1,4 +1,4 @@
-gpu = True
+gpu = False
 import numpy as np
 if not gpu:
     import numpy as cp
@@ -25,11 +25,31 @@ The functions uses the wavelength provided by KPO.CWAVEL
 
 # Utility for phase optimization
 def distance(yy, xx, yx):
-    """yy, xx, yx"""
+    """
+    Returns a map of the distance to a point yx
+    Parameters:
+    -----------
+    yy         : map of y coordinates
+    xx         : map of x coordinates
+    yx         : y,x coordinates of the point of interest
+    
+    """
     dist = np.sqrt((xx-yx[1])**2 + (yy-yx[0])**2)
     return dist
 
 def get_cvis(self, params):
+    """
+    Just a macro that returns complex visibilities for the parameter
+    Parameters:
+    -----------
+    - params   : A parameter vector for a binary model
+                    - p[0] = sep (mas)
+                    - p[1] = PA (deg) E of N.
+                    - p[2] = contrast ratio (primary/secondary)
+                    optional:
+                    - p[3] = angular size of primary (mas)
+                    - p[4] = angular size of secondary (mas)
+    """
     u = self.kpi.UVC[:,0]
     v = self.kpi.UVC[:,1]
     return xara.cvis_binary(u,v, self.CWAVEL, params, 0)
