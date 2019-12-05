@@ -1,4 +1,4 @@
-gpu = False
+gpu = True
 import numpy as np
 if not gpu:
     import numpy as cp
@@ -57,12 +57,18 @@ xara.KPO.get_kernel_signature = get_kernel_signature
 
     
 def get_sadk_signature(self, params, verbose=False):
-    """Returns the theoretical ADK signature of a binary signal
-    
+    """Returns a series of kernel signatures 
     The result is given (end - start)
     Parameters:
     -----------
     - params    : An array of parameters
+                    - p[0] = sep (mas)
+                    - p[1] = PA (deg) E of N.
+                    - p[2] = contrast ratio (primary/secondary)
+                    optional:
+                    - p[3] = angular size of primary (mas)
+                    - p[4] = angular size of secondary (mas)
+
     - verbose   : If true it says what parameters are subtracted to what
     
     """
@@ -90,8 +96,8 @@ def whitened_kpd_binary_match_map(self, gsz, gstep, kp_signal,W=None, cref=1000,
 
     Remarks:
     -------
-    In the high-contrast regime, the amplitude is proportional to the
-    companion brightness ratio.
+    In the high-contrast regime, the amplitude is inversely 
+    proportional to the contrast.
     ---------------------------------------------------------------
     """
     if W is None:
@@ -205,9 +211,9 @@ xara.KPO.get_adk_residual = get_adk_residual
 
 
 
-def gpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
+def gpu_sadk_binary_match_map(self, gsz, gstep, adk_signalg, W=None,deltas=None,
                                    verbose=False, project = True, cref=1000, full_output=False,
-                                   thetype=cp.float64):
+                                   thetype=cp.float32):
     """ Produces a 2D-map showing where the best binary fit occurs
 
     Computes the dot product between the kp_signal and a grid (x,y) grid of 
@@ -217,7 +223,7 @@ def gpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
     ----------
     - gsz       : grid size (gsz x gsz)
     - gstep     : grid step in mas
-    - adk_signal: a 2d array containing the kernel-phase vectors
+    - adk_signal: a 2d array (numpy or cupy) containing the kernel-phase vectors
     - cref      : reference contrast (optional, default = 1000)
     - W         : a cube of whitening matrices for the data 
     - deltas    : An array containing the values of field rotation angles
@@ -225,8 +231,8 @@ def gpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
 
     Remarks:
     -------
-    In the high-contrast regime, the amplitude is proportional to the
-    companion brightness ratio.
+    In the high-contrast regime, the amplitude of the signature is inversely 
+    proportional to the contrast.
     ---------------------------------------------------------------
     """
     import cupy as cp
@@ -235,7 +241,7 @@ def gpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
     if W is not None:
         print("W is not necessary! This function now uses a whitening L matrix kpo.Mp")
         return 1
-    if deltas.shape[0] != adk_signal.shape[0]:
+    if deltas.shape[0] != adk_signalg.shape[0]:
         print("Bad kernel shape")
         return 1
     if deltas is None:
@@ -243,19 +249,15 @@ def gpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
         return 1
     
     nf = deltas.shape[0]
-    if project:
-        if cp.get_array_module(self.Mp) is not cp:
-            print("This is the GPU version, it wants a cp array!")
-            return 1
-        L = self.Mp
-    else: 
-        L = np.identity(adk_signal.flatten().shape[0])
 
-    
-    adk_signalg = cp.array(adk_signal)
+    if cp.get_array_module(self.Mp) is not cp:
+        print("This is the GPU version, it wants a cp array!")
+        return 1
+
+
     #building a grid
     a = cp.vstack(adk_signalg.flatten())
-    lwadk_signal = L.dot(a)
+    lwadk_signal = self.Mp.dot(a)
 
     xs, ys = np.meshgrid(np.arange(gsz), np.arange(gsz))
     ds = np.round(gsz/2)
@@ -290,25 +292,23 @@ def gpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
     for pix in pixels:
         wsigss.append(signaturesg[pix].flatten())
     wsigss = cp.vstack(wsigss)
-    pixelthproj = L.dot(wsigss.T)
-    pixelcrit = pixelthproj.T.dot(lwadk_signal) / cp.linalg.norm(pixelthproj, axis=0)
+    pixelthproj = self.Mp.dot(wsigss.T)
+    pixnorm = cp.squeeze(cp.linalg.norm(pixelthproj, axis=0))
+    crit = cp.squeeze(pixelthproj.T.dot(lwadk_signal)) / pixnorm
 
-    projectedth = pixelthproj
-    crit = pixelcrit
     #print("crit",crit.shape)
     #print("gsz", gsz)
     #print("pixelthproj", pixelthproj.shape)
     if not full_output:
         return(crit.reshape(gsz, gsz))
     else :
-        return(cp.asnumpy(crit.reshape(gsz,gsz)), cp.asnumpy(cp.linalg.norm(projectedth, axis=0).reshape(gsz,gsz)),
+        return(cp.asnumpy(crit.reshape(gsz,gsz)), cp.asnumpy(pixnorm.reshape(gsz,gsz)),
                rhos.reshape(gsz,gsz), thetas.reshape(gsz,gsz))
 
 xara.KPO.gpu_sadk_binary_match_map = gpu_sadk_binary_match_map
 
 def cpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
-                                   verbose=False, project=True, cref=1000, full_output=False,
-                                   thetype=np.float64):
+                                   verbose=False, project=True, cref=1000, full_output=False):
     """ Produces a 2D-map showing where the best binary fit occurs
 
     Computes the dot product between the kp_signal and a grid (x,y) grid of 
@@ -322,12 +322,11 @@ def cpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
     - cref      : reference contrast (optional, default = 1000)
     - W         : a cube of whitening matrices for the data 
     - deltas    : An array containing the values of field rotation angles
-    - thetype   : the cupy dtype for the GPU matrices (np.float64 or np.float32 recommended)
 
     Remarks:
     -------
-    In the high-contrast regime, the amplitude is proportional to the
-    companion brightness ratio.
+    In the high-contrast regime, the amplitude of the signature is inversely 
+    proportional to the contrast.
     ---------------------------------------------------------------
     """
     #import cupy as cp
@@ -376,9 +375,8 @@ def cpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
         itparams = tqdm(superparams)
     else:
         itparams = superparams
-    signatures = np.array([self.get_sadk_signature(p, verbose=False) for p in itparams])
+    signaturesg = np.array([self.get_sadk_signature(p, verbose=False) for p in itparams])
     
-    signaturesg = signatures.astype(thetype)
     
     if verbose:
         print("Projection and reduction")
@@ -393,7 +391,8 @@ def cpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
         wsigss.append(signaturesg[pix].flatten())
     wsigss = np.vstack(wsigss)
     pixelthproj = self.Mp.dot(wsigss.T)
-    crit = np.squeeze(pixelthproj.T.dot(lwadk_signal)) / np.squeeze(np.linalg.norm(pixelthproj, axis=0))
+    pixnorm = cp.squeeze(np.linalg.norm(pixelthproj, axis=0))
+    crit = np.squeeze(pixelthproj.T.dot(lwadk_signal)) / pixnorm
 
     #print("crit",crit.shape)
     #print("gsz", gsz)
@@ -402,13 +401,19 @@ def cpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
     if not full_output:
         return(crit.reshape(gsz, gsz))
     else :
-        return(crit.reshape(gsz,gsz), np.linalg.norm(pixelthproj, axis=0).reshape(gsz,gsz),
+        return(crit.reshape(gsz,gsz), pixnorm.reshape(gsz,gsz),
                rhos.reshape(gsz,gsz), thetas.reshape(gsz,gsz))
 
 xara.KPO.cpu_sadk_binary_match_map = cpu_sadk_binary_match_map
 
 def Sglr(y, xhat):
-    """A simple function to return the GLRt statistic (Ceau et al. 2019)
+    """
+    A simple function to return the GLRt statistic (Ceau et al. 2019)
+    
+    Parameters:
+    ----------
+    y         : The signature to test
+    xhat      : The Maximum Likelihood Estimate signature
     
     """
     St = 2*np.squeeze(y).T.dot(xhat) - xhat.T.dot(xhat)
@@ -418,7 +423,21 @@ xara.Sglr = Sglr
 from lmfit import minimize, Parameters, report_errors, Minimizer
 
 def define_roi(self, verbose=True):
+    """
+    A method that defines the region of interest probed by the kernel model (kpi)
+    Reads values from the kpi object ant writes to:
     
+    self.rhomin (the Inner Working Angle)
+        defined as 0.5 lambda/D (D = longest baseline)
+    self.rhomax (the Outer Working Angle)
+        defined as 0.5 lambda/b (D = shortest baseline)
+        
+    returns 
+    resol       : Resolution (number of elements along axis) 
+    gstep       : step of a minimal grid for an exploration map.
+    
+    Remark: resol*2 and gstep/2 are recommended for pretty pictures.
+    """
     lengths = np.sqrt(self.kpi.UVC[:,0]**2 + self.kpi.UVC[:,1]**2)
     D = np.max(lengths)
     b = np.min(lengths)
@@ -435,8 +454,7 @@ def global_GLR(self, signal, W=None, dtheta=None, n=10, N=1000, mode="cmap", ver
     Parameters:
     ----------
     signal     : The non whitened calibrated data (if none, use self.KPDT)
-    W          : The whitening matrix for theoretical data (if none,
-                build it from self.kp_cov)
+    W          : Deprecated -> use self.Mp instead for post-processing matrix
     dtheta     : The rotation angle for ADK (if none, consider classical data)
     n          : When n realizations of the GLR under H0 are obtained above Sglr(y)
                 the algorithm stops (sufficient statistics)
@@ -445,8 +463,7 @@ def global_GLR(self, signal, W=None, dtheta=None, n=10, N=1000, mode="cmap", ver
     Explored space is by default lambda/(2D) to lambda/(2b), the corresponding
     values are stored to kpo as self.rhomin and self.rhomax.
     
-    Warning: The determination of pitch for the cmap doesn't take into account the
-    use of a bfilter in KPO.
+
     """
     if W is None:
         print("Matrix should be provided in KPO.Mp")
@@ -496,7 +513,9 @@ def global_GLR(self, signal, W=None, dtheta=None, n=10, N=1000, mode="cmap", ver
     
     
 def Sglr_fitandget(self, kappa=None, W=None, dtheta=None, mode="cmap", showmap="False"):
-    """Computes the GLRb statistic of a whitened signal
+    """
+    Method used by global_GLR()
+    Computes the GLRb statistic of a whitened signal
     Returns the statistc as well as the fitted parameters in the
     lmfit Parameters format
     
@@ -584,6 +603,10 @@ def Sglr_fitandget(self, kappa=None, W=None, dtheta=None, mode="cmap", showmap="
         Sglry = xara.Sglr(np.array([y]),xhat)
     return Sglry, paramshat
 
+
+xara.KPO.global_GLR = global_GLR
+xara.KPO.Sglr_fitandget = Sglr_fitandget
+
 class kpd_fitter(object):
     
     def __init__(self,kpo,satmask,mytool):
@@ -614,8 +637,6 @@ class kpd_fitter(object):
         err = self.W.dot(self.kpd - self.calib - kernel)
         return err
 
-xara.KPO.global_GLR = global_GLR
-xara.KPO.Sglr_fitandget = Sglr_fitandget
 
 def shifter(im0,vect, buildmask = True, sg_rad=40.0, verbose=False, nbit=10):
 
