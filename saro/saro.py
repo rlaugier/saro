@@ -6,7 +6,7 @@ else:
     import cupy as cp
 import xara
 
-from kernel_cm import br, bo, vdg, bbr
+from .kernel_cm import br, bo, vdg, bbr
 
 import xaosim
 from tqdm import  tqdm
@@ -17,7 +17,7 @@ from scipy.linalg import sqrtm
 
 from xara import fft, ifft, shift
 
-import detection_maps as dmap
+from . import detection_maps as dmap
 """
 The functions uses the wavelength provided by KPO.CWAVEL
 """
@@ -220,11 +220,13 @@ def get_adk_residual(self, params, y, dtheta):
     residual = self.Mp.dot(kappa.flatten()) - y
     return residual
 def get_kpd_residual(self, params, y, W, wl, dtheta):
-    kappa = get_sadk_signature(self, np.array([params["rho"],params["theta"],params["contrast"]]), dtheta, verbose=False)
+    kappa = get_sadk_signature(self, np.array([params["rho"],params["theta"],params["contrast"]]),
+                               verbose=False)
     residual = W.dot(kappa) - y
     return residual
 
 xara.KPO.get_adk_residual = get_adk_residual
+xara.KPO.get_kpd_residual = get_kpd_residual
 
 
 
@@ -714,14 +716,14 @@ def shifter(im0,vect, buildmask = True, sg_rad=40.0, verbose=False, nbit=10):
 
     return (dummy * mynorm / dummy.sum())
 
-def intro_companion(image, params, pscale):
+def intro_companion(image, params, pscale, sg_rad=40):
     rho = params[0]
     theta = params[1]
     c = params[2]
     xshift = (- rho * np.sin(np.deg2rad(theta))) / pscale
     yshift = ( rho * np.cos(np.deg2rad(theta)) ) / pscale
     
-    compagim = shifter(image, np.array([-yshift, -xshift]))
+    compagim = shifter(image, np.array([-yshift, -xshift]), sg_rad=sg_rad)
     return image + compagim / c
 
 
