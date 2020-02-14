@@ -81,7 +81,8 @@ def get_sadk_signature(self, params, verbose=False):
     The result is given (end - start)
     Parameters:
     -----------
-    - params    : An array of parameters
+    - params    : An array of parameters of parameters object
+                 (stacked along dimension 0)
                     - p[0] = sep (mas)
                     - p[1] = PA (deg) E of N.
                     - p[2] = contrast ratio (primary/secondary)
@@ -100,105 +101,6 @@ def get_sadk_signature(self, params, verbose=False):
 xara.KPO.get_sadk_signature = get_sadk_signature
 
 
-def whitened_kpd_binary_match_map(self, gsz, gstep, kp_signal,W=None, cref=1000, full_output=False):
-    """ Produces a 2D-map showing where the best binary fit occurs
-
-    Computes the dot product between the kp_signal and a grid (x,y) grid of 
-    possible positions for the companion, for a pre-set contrast.
-
-    Parameters:
-    ----------
-    - gsz       : grid size (gsz x gsz)
-    - gstep     : grid step in mas
-    - kp_signal : the kernel-phase vector
-    - cref      : reference contrast (optional, default = 1000)
-    - W         : a whitening matrix for the data (if not provided, will use kp_cov to build one)
-
-    Remarks:
-    -------
-    In the high-contrast regime, the amplitude is inversely 
-    proportional to the contrast.
-    ---------------------------------------------------------------
-    """
-    if W is None:
-        print("No whitening matrix provided: building it from the kpo.kp_cov")
-        try:
-            kpcov = self.kp_cov
-        except:
-            print("You must provide a covariance matrix")
-            return 1.
-        kernelcov = self.kpi.KPM.dot(self.kp_cov).dot(self.kpi.KPM.T)
-        W = sqrtm(np.linalg.inv(kernelcov))
-    mgrid = np.zeros((gsz, gsz))
-
-    cvis = 1.0 + cref * xara.grid_precalc_aux_cvis(
-        self.kpi.UVC[:,0],
-        self.kpi.UVC[:,1],
-        self.CWAVEL, mgrid, gstep)
-
-    kpmap = self.kpi.KPM.dot(np.angle(cvis))
-    crit  = W.dot(kpmap).T.dot(W.dot(kp_signal)) / np.linalg.norm(W.dot(kpmap), axis=0)
-    print("kpmap shape", kpmap.shape)
-    print("kp_signal shape", kp_signal.shape)
-    if not full_output:
-        return(crit.reshape(gsz, gsz) )
-    else:
-        return(crit.reshape(gsz,gsz), np.linalg.norm(W.dot(kpmap), axis=0).reshape(gsz,gsz),
-               rhos.reshape(gsz,gsz), thetas.reshape(gsz,gsz))
-xara.KPO.whitened_kpd_binary_match_map = whitened_kpd_binary_match_map
-
-    
-def whitened_adk_binary_match_map(self, gsz, gstep, adk_signal,W=None,dtheta=None, cref=1000, full_output=False):
-    """ Produces a 2D-map showing where the best binary fit occurs
-
-    Computes the dot product between the kp_signal and a grid (x,y) grid of 
-    possible positions for the companion, for a pre-set contrast.
-
-    Parameters:
-    ----------
-    - gsz       : grid size (gsz x gsz)
-    - gstep     : grid step in mas
-    - adk_signal : the kernel-phase vector, kappa2-kappa1
-    - cref      : reference contrast (optional, default = 1000)
-    - W         : a whitening matrix for the data (if not provided, will use kp_cov to build one)
-    - dtheta    : the field rotation angle from first to last
-
-    Remarks:
-    -------
-    In the high-contrast regime, the amplitude is proportional to the
-    companion brightness ratio.
-    ---------------------------------------------------------------
-    """
-    if dtheta is None:
-        print("Error: need a rotation angle")
-        return 1
-    if W is None:
-        print("No whitening matrix provided: building it from the kpo.kp_cov")
-        try:
-            kpcov = self.kp_cov
-        except:
-            print("You must provide a covariance matrix")
-            return 1.
-        kernelcov = self.kpi.KPM.dot(self.kp_cov).dot(self.kpi.KPM.T)
-        W = sqrtm(np.linalg.inv(kernelcov))
-    wadk_signal = W.dot(adk_signal)
-    #building a grid
-    xs, ys = np.meshgrid(np.arange(gsz), np.arange(gsz))
-    ds = np.round(gsz/2)
-    cpform = ((ys-ds)*gstep).flatten() + 1j*((-(xs-ds))*gstep).flatten()
-    rhos, thetas = np.abs(cpform), np.angle(cpform)*180./np.pi
-    params = np.array([rhos, thetas, cref*np.ones_like(rhos)]).T
-    
-    wsigs = np.array([W.dot(self.get_adk_signature(p, wl, dtheta, verbose=False)) for p in params]).T
-    #print("wsigs shape", wsigs.shape)
-    #print("adk_signal shape", adk_signal.shape)
-    crit  = (wsigs.T.dot(wadk_signal)) / np.linalg.norm(wsigs, axis=0)
-    if not full_output:
-        return(crit.reshape(gsz, gsz))
-    else :
-        return(crit.reshape(gsz,gsz), np.linalg.norm(wsigs, axis=0).reshape(gsz,gsz),
-               rhos.reshape(gsz,gsz), thetas.reshape(gsz,gsz))
-xara.KPO.whitened_adk_binary_match_map = whitened_adk_binary_match_map
 
 
     
@@ -230,9 +132,6 @@ xara.KPO.get_kpd_residual = get_kpd_residual
 
 
 
-
-
-
 def gpu_sadk_binary_match_map(self, gsz, gstep, adk_signalg, W=None,deltas=None,
                                    verbose=False, project = True, cref=1000, full_output=False,
                                    thetype=cp.float32):
@@ -245,11 +144,17 @@ def gpu_sadk_binary_match_map(self, gsz, gstep, adk_signalg, W=None,deltas=None,
     ----------
     - gsz       : grid size (gsz x gsz)
     - gstep     : grid step in mas
-    - adk_signal: a 2d array (numpy or cupy) containing the kernel-phase vectors
+    - adk_signalg: a 2d array (cupy) containing the kernel-phase vectors
     - cref      : reference contrast (optional, default = 1000)
-    - W         : a cube of whitening matrices for the data 
+    - W         : deprecated (cube of whitening matrices) (provide through kpo.Mp (cupy array))
     - deltas    : An array containing the values of field rotation angles
     - thetype   : the cupy dtype for the GPU matrices (cp.float64 or cp.float32 recommended)
+    - full_output:False: returns only an array containing the matched filter:
+                  True: returns:
+                          -Array containing the matched filter
+                          -Array of the model norm
+                          -Array of the separation (mas)
+                          -Array of the position angle (deg)
 
     Remarks:
     -------
@@ -344,6 +249,12 @@ def cpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
     - cref      : reference contrast (optional, default = 1000)
     - W         : a cube of whitening matrices for the data 
     - deltas    : An array containing the values of field rotation angles
+    - full_output:False: returns only an array containing the matched filter:
+                  True: returns:
+                          -Array containing the matched filter
+                          -Array of the model norm
+                          -Array of the separation (mas)
+                          -Array of the position angle (deg)
 
     Remarks:
     -------
@@ -763,3 +674,85 @@ def optimize_phase(akpo, phases, imsize):
         
     cviscor = np.array(cviscor)
     return cviscor
+
+
+from scipy.sparse import diags
+
+def create_cov_matrix(self, var_img, ref_img=None, kernel=True,
+                      verbose=False, option="ABS", m2pix=None):
+        ''' -------------------------------------------------------------------
+        generate the covariance matrix for the UV phase.
+
+        For independant noise in the image plane, with a high SNR, the relationship between image and phase can be linearized.
+
+        Parameters:
+        ----------
+        - var_img: a 2D image with variance per pixel
+        - ref_img: optional, a 2D image constituting the nominal reference
+                    for the complex visibility
+        - kernel: weather to compute the kernel phase covariance based on
+                    the phase covariance
+        - m2pix:   Necessary m2pix parameter to compute the F matrix id necessary
+
+        Option:
+        ------
+        This is an ongoing investigation: should the computation involve the
+        model redundancy or the real part of the Fourier transform? In the 
+        latter scenario, should the computation include cross-terms between
+        imaginary and real parts to be more exact?
+        
+        - "RED":  uses the model redundancy vector
+        - "REAL": uses the real part of the FT
+        - "ABS" : computation based on the a visibility modulus
+
+        Note: Covariance matrix can also be computed via MC simulations, if
+        you are unhappy with the current one. See "append_cov_matrix()"
+        ------------------------------------------------------------------- '''
+
+        ISZ = var_img.shape[0]
+        try:
+            test = self.FF # check to avoid recomputing auxilliary arrays!
+
+        except:
+            if m2pix is not None:
+                self.FF = core.compute_DFTM1(self.kpi.UVC, m2pix, ISZ)
+            else:
+                print("Fourier matrix and/or m2pix are not available.")
+                print("Please compute Fourier matrix.")
+                return
+            
+        #The best is to create real and imaginary parts independantly
+        if ref_img is not None:
+            if verbose:
+                print("Using a separate reference for amplitude")
+            ft = self.FF.dot(ref_img.flat)
+        else :
+            ft = self.FF.dot(var_img.flat)
+        
+ 
+        cov_img = diags(var_img.flatten())
+            
+        if option == "RED":
+            if verbose:
+                print("Do not use that: normalization is WIP")
+                B = np.diag(1.0/self.kpi.RED).dot(np.angle(self.FF))
+            
+            
+        if option == "REAL":
+            if verbose:
+                print("Covariance Matrix computed using the real part of FT!")
+            refj = np.real(ft)
+        
+        if option == "ABS":
+            if verbose:
+                print("Covariance Matrix computed using the abs of the FT!")
+            refj = np.abs(ft)
+        
+        
+        B = self.FF.imag / refj[:, None]
+        self.phi_cov = B.dot(cov_img.dot(B.T))
+        if kernel:
+            if verbose:
+                print("Computing the covariance of kernelized observables")
+            self.kappa_cov = self.kpi.KPM.dot(self.phi_cov).dot(self.kpi.KPM.T)
+xara.KPO.create_cov_matrix = create_cov_matrix
