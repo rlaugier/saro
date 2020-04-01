@@ -374,6 +374,9 @@ def define_roi(self, verbose=True):
     lengths = np.sqrt(self.kpi.UVC[:,0]**2 + self.kpi.UVC[:,1]**2)
     D = np.max(lengths)
     b = np.min(lengths)
+    if verbose:
+        print("D = ", D)
+        print("b = ", b)
     self.rhomin = 0.5*self.CWAVEL / D * 180/np.pi * 3600 * 1000
     self.rhomax = 0.5*self.CWAVEL / b * 180/np.pi * 3600 * 1000
     gstep = self.rhomin
@@ -756,3 +759,79 @@ def create_cov_matrix(self, var_img, ref_img=None, kernel=True,
                 print("Computing the covariance of kernelized observables")
             self.kappa_cov = self.kpi.KPM.dot(self.phi_cov).dot(self.kpi.KPM.T)
 xara.KPO.create_cov_matrix = create_cov_matrix
+
+
+
+def plot_pupil_and_uv(self, xymax=None, figsize=(8,4), plot_redun = False,
+                          cmap=cm.gray, ssize=7.5, lw=0, alpha=1.0, marker='o',
+                          usesize=False, showminmax=False):
+        '''Nice plot of the pupil sampling and matching uv plane.
+
+        --------------------------------------------------------------------
+        Options:
+        ----------
+
+        - xymax: radius of pupil plot in meters           (default=None)
+        - figsize: matplotlib figure size                 (default=(12,6))
+        - plot_redun: bool add the redundancy information (default=False)
+        - cmap: matplotlib colormap                       (default:cm.gray)
+        - ssize: symbol size                              (default=12)
+        - lw:  line width for symbol outline              (default=0)
+        - alpha: gamma (transparency)                     (default=1)
+        - maker: matplotlib marker for sub-aperture       (default='o')
+        - usesize: size of markers indicate transmission  (default=None)
+        - showminmax: write the min and max RED values    (default=False)
+        - -------------------------------------------------------------------
+        '''
+
+        
+
+        f0 = plt.figure(figsize=figsize)
+        plt.clf()
+        ax0 = plt.subplot(121)
+
+        s1, s2 = ssize**2, (ssize/2)**2
+        if usesize:
+            ax0.scatter(self.VAC[:,0], self.VAC[:,1], s=s1*self.VAC[:,2], c=np.zeros_like(self.VAC[:,2]),
+                    cmap=cm.gray, alpha=alpha, marker=marker, lw=lw,
+                    vmin=0.0, vmax=1.0)
+        else:
+            pl0 = ax0.scatter(self.VAC[:,0], self.VAC[:,1], s=s1, c=self.VAC[:,2],
+                    cmap=cmap, alpha=alpha, marker=marker, lw=lw,
+                    vmin=0.0, vmax=1.0)
+        if xymax is None:
+            xymax = np.nanmax(np.abs(self.VAC)) *1.1
+        ax0.axis([-xymax, xymax, -xymax, xymax], aspect='equal')
+        ax0.set_xlabel("Aperture x-coordinate (meters)")
+        ax0.set_ylabel("Aperture y-coordinate (meters)")
+
+        ax1 = plt.subplot(122)
+        ax1.scatter(-self.UVC[:,0], -self.UVC[:,1], s=s2, c=self.RED,
+                    cmap=cmap, alpha=alpha, marker=marker, lw=lw)
+        ax1.scatter(self.UVC[:,0], self.UVC[:,1], s=s2, c=self.RED,
+                    cmap=cmap, alpha=alpha, marker=marker, lw=lw)
+        ax1.axis([-2*xymax, 2*xymax, -2*xymax, 2*xymax], aspect='equal')
+        ax1.set_xlabel("Fourier u-coordinate (meters)")
+        ax1.set_ylabel("Fourier v-coordinate (meters)")
+        if showminmax:
+            stringmin = r"$R_{min}$ = %.2f"%(np.min(self.RED))
+            stringmax = r"$R_{max}$ = %.0f"%(np.max(self.RED))
+            plt.text(np.min(self.UVC[:,0]), np.min(self.UVC[:,1]), stringmin)
+            plt.text(np.min(self.UVC[:,0]), 0.9*np.max(self.UVC[:,1]), stringmax)
+        
+
+        # complete previous plot with redundancy of the baseline
+        # -------------------------------------------------------
+        dy = 0.1*abs(self.uv[0,1]-self.uv[1,1]) # to offset text in the plot.
+        if plot_redun:
+            for i in range(self.nbuv):
+                ax1.text(self.uv[i,0]+dy, self.uv[i,1]+dy, 
+                         int(self.RED[i]), ha='center')        
+            ax1.axis('equal')
+        plt.draw()
+        f0.set_tight_layout(True)
+        return f0
+
+    # =========================================================================
+    # =========================================================================
+xara.KPI.plot_pupil_and_uv = plot_pupil_and_uv
