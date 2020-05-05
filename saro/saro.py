@@ -18,6 +18,20 @@ from scipy.linalg import sqrtm
 from xara import fft, ifft, shift
 
 from . import detection_maps as dmap
+
+
+from lmfit import minimize, Parameters, report_errors, Minimizer
+
+
+
+from scipy.sparse import diags
+
+
+
+
+import matplotlib.cm as cm
+
+
 """
 The functions uses the wavelength provided by KPO.CWAVEL
 """
@@ -38,511 +52,588 @@ def distance(yy, xx, yx):
     return dist
 
 
-def get_cvis(self, params):
+class KPO(xara.KPO):
     """
-    Just a macro that returns complex visibilities for the parameter
-    Parameters:
-    -----------
-    - params   : A parameter vector for a binary model
-                    - p[0] = sep (mas)
-                    - p[1] = PA (deg) E of N.
-                    - p[2] = contrast ratio (primary/secondary)
-                    optional:
-                    - p[3] = angular size of primary (mas)
-                    - p[4] = angular size of secondary (mas)
-    """
-    u = self.kpi.UVC[:,0]
-    v = self.kpi.UVC[:,1]
-    return xara.cvis_binary(u,v, self.CWAVEL, params, 0)
-xara.KPO.get_cvis = get_cvis
+    Same good old xara.KPO class with a few added goodies:
     
-def get_kernel_signature(self, params):
-    """Returns the theoretical kernel signature of a binary signal
-    
-    The result is given (end - start)
-    Parameters:
-    -----------
-    - params   : A parameter vector for a binary model
-                    - p[0] = sep (mas)
-                    - p[1] = PA (deg) E of N.
-                    - p[2] = contrast ratio (primary/secondary)
-                    optional:
-                    - p[3] = angular size of primary (mas)
-                    - p[4] = angular size of secondary (mas)
-    """
-    cvis = self.get_cvis(params)
-    Phi = np.angle(cvis)
-    kappa = self.kpi.KPM.dot(Phi)
-    return kappa
-xara.KPO.get_kernel_signature = get_kernel_signature
-
-    
-def get_sadk_signature(self, params, verbose=False):
-    """Returns a series of kernel signatures 
-    The result is given (end - start)
-    Parameters:
-    -----------
-    - params    : An array of parameters of parameters object
-                 (stacked along dimension 0)
-                    - p[0] = sep (mas)
-                    - p[1] = PA (deg) E of N.
-                    - p[2] = contrast ratio (primary/secondary)
-                    optional:
-                    - p[3] = angular size of primary (mas)
-                    - p[4] = angular size of secondary (mas)
-
-    - verbose   : If true it says what parameters are subtracted to what
-    
+    -define_roi(): Computes the region of interest that the model can reach
+    -create_cov_matrix(): Creates an estimation of the cov matrix (fixed)
+    -build_L_matrix(): Builds a L matrix for ADK
+    -plot_pupil_and_uv(): Improved version
+    -global_GLR(): Conducts an iterative GLR test on the data
+    -gpu_sadk_binary_match_map(): Colinearity maps (ADK compatible)
+    -cpu_sadk_binary_match_map(): Colinearity maps (ADK compatible) GPU accelerated
+    -get_cvis(): Directly gets binary cvis
+    -get_sadk_signature(): Directly gets binary kernel-phase signaure in batch
+    -get_kernel_signature(): Directly gets binary kernel-phase signature
     """
     
-    kappa = np.array([self.get_kernel_signature(params[i,:]) for i in range(params.shape[0])])
-    if verbose:
-        print("Obtaining kerneks signatures for ", params )
-    return kappa
-xara.KPO.get_sadk_signature = get_sadk_signature
+
+    def get_cvis(self, params):
+        """
+        Just a macro that returns complex visibilities for the parameter
+        Parameters:
+        -----------
+        - params   : A parameter vector for a binary model
+                        - p[0] = sep (mas)
+                        - p[1] = PA (deg) E of N.
+                        - p[2] = contrast ratio (primary/secondary)
+                        optional:
+                        - p[3] = angular size of primary (mas)
+                        - p[4] = angular size of secondary (mas)
+        """
+        u = self.kpi.UVC[:,0]
+        v = self.kpi.UVC[:,1]
+        return xara.cvis_binary(u,v, self.CWAVEL, params, 0)
+    
+    def get_kernel_signature(self, params):
+        """Returns the theoretical kernel signature of a binary signal
+
+        The result is given (end - start)
+        Parameters:
+        -----------
+        - params   : A parameter vector for a binary model
+                        - p[0] = sep (mas)
+                        - p[1] = PA (deg) E of N.
+                        - p[2] = contrast ratio (primary/secondary)
+                        optional:
+                        - p[3] = angular size of primary (mas)
+                        - p[4] = angular size of secondary (mas)
+        """
+        cvis = self.get_cvis(params)
+        Phi = np.angle(cvis)
+        kappa = self.kpi.KPM.dot(Phi)
+        return kappa
+
+    
+    def get_sadk_signature(self, params, verbose=False):
+        """Returns a series of kernel signatures 
+        The result is given (end - start)
+        Parameters:
+        -----------
+        - params    : An array of parameters of parameters object
+                     (stacked along dimension 0)
+                        - p[0] = sep (mas)
+                        - p[1] = PA (deg) E of N.
+                        - p[2] = contrast ratio (primary/secondary)
+                        optional:
+                        - p[3] = angular size of primary (mas)
+                        - p[4] = angular size of secondary (mas)
+
+        - verbose   : If true it says what parameters are subtracted to what
+
+        """
+
+        kappa = np.array([self.get_kernel_signature(params[i,:]) for i in range(params.shape[0])])
+        if verbose:
+            print("Obtaining kerneks signatures for ", params )
+        return kappa
 
 
 
 
     
-def build_L_matrix(self, nf, crop=True, giveUf=True):
-    Uf = sparse.vstack([sparse.identity(self.kpi.nbkp) for i in range(nf)])
-    L = (sparse.identity(Uf.shape[0]) - 1/nf * Uf.dot(Uf.T))
-    if crop:
-        L = L[:-self.kpi.nbkp,:]
-    if giveUf:
-        return L, Uf
-    else :
-        return L
-xara.KPO.build_L_matrix = build_L_matrix
-
-
-def get_adk_residual(self, params, y, dtheta):
-    pparams = np.array([np.array([params["rho"],params["theta"],params["contrast"]]) + np.array([0, theta, 0]) for theta in dtheta])
-    kappa = get_sadk_signature(self, pparams, verbose=False)
-    residual = self.Mp.dot(kappa.flatten()) - y
-    return residual
-def get_kpd_residual(self, params, y, W, wl, dtheta):
-    kappa = get_sadk_signature(self, np.array([params["rho"],params["theta"],params["contrast"]]),
-                               verbose=False)
-    residual = W.dot(kappa) - y
-    return residual
-
-xara.KPO.get_adk_residual = get_adk_residual
-xara.KPO.get_kpd_residual = get_kpd_residual
-
-
-
-def gpu_sadk_binary_match_map(self, gsz, gstep, adk_signalg, W=None,deltas=None,
-                                   verbose=False, project = True, cref=1000, full_output=False,
-                                   thetype=cp.float32):
-    """ Produces a 2D-map showing where the best binary fit occurs
-
-    Computes the dot product between the kp_signal and a grid (x,y) grid of 
-    possible positions for the companion, for a pre-set contrast.
-
-    Parameters:
-    ----------
-    - gsz       : grid size (gsz x gsz)
-    - gstep     : grid step in mas
-    - adk_signalg: a 2d array (cupy) containing the kernel-phase vectors
-    - cref      : reference contrast (optional, default = 1000)
-    - W         : deprecated (cube of whitening matrices) (provide through kpo.Mp (cupy array))
-    - deltas    : An array containing the values of field rotation angles
-    - thetype   : the cupy dtype for the GPU matrices (cp.float64 or cp.float32 recommended)
-    - full_output:False: returns only an array containing the matched filter:
-                  True: returns:
-                          -Array containing the matched filter
-                          -Array of the model norm
-                          -Array of the separation (mas)
-                          -Array of the position angle (deg)
-
-    Remarks:
-    -------
-    In the high-contrast regime, the amplitude of the signature is inversely 
-    proportional to the contrast.
-    ---------------------------------------------------------------
-    """
-    import cupy as cp
-    #A few assertions:
-
-    if W is not None:
-        print("W is not necessary! This function now uses a whitening L matrix kpo.Mp")
-        return 1
-    if deltas.shape[0] != adk_signalg.shape[0]:
-        print("Bad kernel shape")
-        return 1
-    if deltas is None:
-        print("Error: need a rotation angle")
-        return 1
-    
-    nf = deltas.shape[0]
-
-    if cp.get_array_module(self.Mp) is not cp:
-        print("This is the GPU version, it wants a cp array!")
-        return 1
-
-
-    #building a grid
-    a = cp.vstack(adk_signalg.flatten())
-    lwadk_signal = self.Mp.dot(a)
-
-    xs, ys = np.meshgrid(np.arange(gsz), np.arange(gsz))
-    ds = np.round(gsz/2)
-    cpform = ((ys-ds)*gstep).flatten() + 1j*((-(xs-ds))*gstep).flatten()
-    rhos, thetas = np.abs(cpform), np.angle(cpform)*180./np.pi
-    thetasdeltas = thetas[:, None] + deltas[None, :]
-    dparams = np.array([np.array([0,deltas[i],0]) for i in range(nf)])
-    params = np.array([rhos, thetas, cref*np.ones_like(rhos)]).T
-
-    #Creating the larger array of parameters for individual observations
-    superparams = params[:, None, :] + dparams[None, :,:]
-    #Retrieving the corresponding model signatures
-    if verbose:
-        print("Getting the model observables")
-        sys.stdout.flush()
-        itparams = tqdm(superparams)
-    else:
-        itparams = superparams
-    signatures = np.array([self.get_sadk_signature(p, verbose=False) for p in itparams])
-    
-    signaturesg = cp.asarray(signatures, dtype=thetype)
-    
-    if verbose:
-        print("Projection and reduction")
-        sys.stdout.flush()
-        pixels = tqdm(range(rhos.shape[0]))
-    else:
-        pixels = range(rhos.shape[0])
-    projectedth = []
-    crit = []
-    wsigss = []
-    for pix in pixels:
-        wsigss.append(signaturesg[pix].flatten())
-    wsigss = cp.vstack(wsigss)
-    pixelthproj = self.Mp.dot(wsigss.T)
-    pixnorm = cp.squeeze(cp.linalg.norm(pixelthproj, axis=0))
-    crit = cp.squeeze(pixelthproj.T.dot(lwadk_signal)) / pixnorm
-
-    #print("crit",crit.shape)
-    #print("gsz", gsz)
-    #print("pixelthproj", pixelthproj.shape)
-    if not full_output:
-        return(crit.reshape(gsz, gsz))
-    else :
-        return(cp.asnumpy(crit.reshape(gsz,gsz)), cp.asnumpy(pixnorm.reshape(gsz,gsz)),
-               rhos.reshape(gsz,gsz), thetas.reshape(gsz,gsz))
-
-xara.KPO.gpu_sadk_binary_match_map = gpu_sadk_binary_match_map
-
-def cpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
-                                   verbose=False, project=True, cref=1000, full_output=False):
-    """ Produces a 2D-map showing where the best binary fit occurs
-
-    Computes the dot product between the kp_signal and a grid (x,y) grid of 
-    possible positions for the companion, for a pre-set contrast.
-
-    Parameters:
-    ----------
-    - gsz       : grid size (gsz x gsz)
-    - gstep     : grid step in mas
-    - adk_signal: a 2d array containing the kernel-phase vectors
-    - cref      : reference contrast (optional, default = 1000)
-    - W         : a cube of whitening matrices for the data 
-    - deltas    : An array containing the values of field rotation angles
-    - full_output:False: returns only an array containing the matched filter:
-                  True: returns:
-                          -Array containing the matched filter
-                          -Array of the model norm
-                          -Array of the separation (mas)
-                          -Array of the position angle (deg)
-
-    Remarks:
-    -------
-    In the high-contrast regime, the amplitude of the signature is inversely 
-    proportional to the contrast.
-    ---------------------------------------------------------------
-    """
-    #import cupy as cp
-    #A few assertions:
-    
-
-    if W is not None:
-        print("W is not necessary! This function now uses a whitening L matrix kpo.Mp")
-        return 1
-#    if deltas.shape[0] != adk_signal.shape[0]:
-#        print("Bad kernel shape")
-#        return 1
-    if deltas is None:
-        print("Error: need a rotation angle")
-        return 1
-    
-    nf = deltas.shape[0]
-    L = self.Mp
-    
-    a = np.vstack(adk_signal.flatten())
-    if project:
-        if len(self.Mp.shape)==3:
-            np.array([self.Mp[i].dot(adk_signal[i]) for i in range(self.Mp.shape[0])])
-        else:
-            lwadk_signal = self.Mp.dot(a)
-    else: 
-        lwadk_signal = a
-
-    
-    #building a grid
-
-    xs, ys = np.meshgrid(np.arange(gsz), np.arange(gsz))
-    ds = np.round(gsz/2)
-    cpform = ((ys-ds)*gstep).flatten() + 1j*((-(xs-ds))*gstep).flatten()
-    rhos, thetas = np.abs(cpform), np.angle(cpform)*180./np.pi
-    thetasdeltas = thetas[:, None] + deltas[None, :]
-    dparams = np.array([np.array([0,deltas[i],0]) for i in range(nf)])
-    params = np.array([rhos, thetas, cref*np.ones_like(rhos)]).T
-
-    #Creating the larger array of parameters for individual observations
-    superparams = params[:, None, :] + dparams[None, :,:]
-    #Retrieving the corresponding model signatures
-    if verbose:
-        print("Getting the model observables")
-        sys.stdout.flush()
-        itparams = tqdm(superparams)
-    else:
-        itparams = superparams
-    signaturesg = np.array([self.get_sadk_signature(p, verbose=False) for p in itparams])
-    
-    
-    if verbose:
-        print("Projection and reduction")
-        sys.stdout.flush()
-        pixels = tqdm(range(rhos.shape[0]))
-    else:
-        pixels = range(rhos.shape[0])
-    projectedth = []
-    crit = []
-    wsigss = []
-    for pix in pixels:
-        wsigss.append(signaturesg[pix].flatten())
-    wsigss = np.vstack(wsigss)
-    pixelthproj = self.Mp.dot(wsigss.T)
-    pixnorm = cp.squeeze(np.linalg.norm(pixelthproj, axis=0))
-    crit = np.squeeze(pixelthproj.T.dot(lwadk_signal)) / pixnorm
-
-    #print("crit",crit.shape)
-    #print("gsz", gsz)
-    #print("pixelthproj", pixelthproj.shape)
-    #print("lwadk",lwadk_signal.shape)
-    if not full_output:
-        return(crit.reshape(gsz, gsz))
-    else :
-        return(crit.reshape(gsz,gsz), pixnorm.reshape(gsz,gsz),
-               rhos.reshape(gsz,gsz), thetas.reshape(gsz,gsz))
-
-xara.KPO.cpu_sadk_binary_match_map = cpu_sadk_binary_match_map
-
-def Sglr(y, xhat):
-    """
-    A simple function to return the GLRt statistic (Ceau et al. 2019)
-    
-    Parameters:
-    ----------
-    y         : The signature to test
-    xhat      : The Maximum Likelihood Estimate signature
-    
-    """
-    St = 2*np.squeeze(y).T.dot(xhat) - xhat.T.dot(xhat)
-    return St
-xara.Sglr = Sglr
-
-from lmfit import minimize, Parameters, report_errors, Minimizer
-
-def define_roi(self, verbose=True):
-    """
-    A method that defines the region of interest probed by the kernel model (kpi)
-    Reads values from the kpi object ant writes to:
-    
-    self.rhomin (the Inner Working Angle)
-        defined as 0.5 lambda/D (D = longest baseline)
-    self.rhomax (the Outer Working Angle)
-        defined as 0.5 lambda/b (D = shortest baseline)
-        
-    returns 
-    resol       : Resolution (number of elements along axis) 
-    gstep       : step of a minimal grid for an exploration map.
-    
-    Remark: resol*2 and gstep/2 are recommended for pretty pictures.
-    """
-    lengths = np.sqrt(self.kpi.UVC[:,0]**2 + self.kpi.UVC[:,1]**2)
-    D = np.max(lengths)
-    b = np.min(lengths)
-    if verbose:
-        print("D = ", D)
-        print("b = ", b)
-    self.rhomin = 0.5*self.CWAVEL / D * 180/np.pi * 3600 * 1000
-    self.rhomax = 0.5*self.CWAVEL / b * 180/np.pi * 3600 * 1000
-    gstep = self.rhomin
-    resol = np.round((self.rhomax/gstep) *2).astype(np.int16)
-    return resol, gstep
-xara.KPO.define_roi = define_roi
-
-def global_GLR(self, signal, W=None, dtheta=None, n=10, N=1000, mode="cmap", verbose=True):
-    """Computes a complete GLR detection test on provided data
-  
-    Parameters:
-    ----------
-    signal     : The non whitened calibrated data (if none, use self.KPDT)
-    W          : Deprecated -> use self.Mp instead for post-processing matrix
-    dtheta     : The rotation angle for ADK (if none, consider classical data)
-    n          : When n realizations of the GLR under H0 are obtained above Sglr(y)
-                the algorithm stops (sufficient statistics)
-    N          : Total number of realizations to do for a positive detection
-    
-    Explored space is by default lambda/(2D) to lambda/(2b), the corresponding
-    values are stored to kpo as self.rhomin and self.rhomax.
-    
-
-    """
-    if W is None:
-        print("Matrix should be provided in KPO.Mp")
-        try:
-            W = self.Mp
-        except:
-            print("You must provide a covariance matrix")
-            return 1.
-    #Whitening the provided data:
-    y = W.dot(signal.flatten())
-    #First step is to define explored space.
-    resol, gstep = self.define_roi()
-    if verbose:
-        print("rho min",self.rhomin)
-        print("rho max", self.rhomax)
-    #Then we can get the test statistic on our data:
-    Sglry, phat = self.Sglr_fitandget(kappa=signal,W=W,dtheta=dtheta,mode=mode, showmap=verbose)
-    print("The statistcs value Sglrb = %f"%(Sglry))
-    print(phat)
-    #Now we want to evaluate the Pfa (Pvalue) of this result.
-    
-    Sglrymc = []
-    n_fp = 0
-    N_done = 0
-    for i in tqdm(np.arange(N)):
-        print("dtheta", dtheta)
-        S, phat = self.Sglr_fitandget(kappa=None,W=W, dtheta=dtheta, mode=mode, showmap=(N_done<10))
-        #print("S shape", S.shape)
-        #print(phat)
-        Sglrymc.append(S)
-        N_done += 1
-        print("Sglr mc = %f"%(S))
-        if S >= Sglry:
-            print("Found a new false positive")
-            n_fp += 1
-        if n_fp >= n:
-            print("Reached %d false positives"%(n))
-            break
-    Sglrymc = np.array(Sglrymc)
-    if n_fp == 0:
-        print("No false positive found")
-        print("Pfa < %f percent"%(100.* 1./N_done))
-    else :
-        print("Found %d false positives"%(n_fp))
-        print("Pfa = %f"%(100. * float(n_fp)/N_done))
-    return Sglry, Sglrymc, phat
-    
-    
-def Sglr_fitandget(self, kappa=None, W=None, dtheta=None, mode="cmap", showmap="False"):
-    """
-    Method used by global_GLR()
-    Computes the GLRb statistic of a whitened signal
-    Returns the statistc as well as the fitted parameters in the
-    lmfit Parameters format
-    
-    Parameters:
-    ----------
-    signal     : The non whitened calibrated data (if none, use self.KPDT)
-    W          : The whitening matrix for theoretical data (if none,
-                build it from self.kp_cov)
-    dtheta     : The rotation angle for ADK (if none, consider classical data)
-    
-    
-    Explored space is by default lambda/(2D) - lambda/(2b)
-    """
-    if mode == "cmap":
-        #We build a colinearity map to get a starting point
-        if kappa is None:
-            y = np.random.normal(loc=0.0,scale=1.0,size=(self.Mp.shape[0]))
+    def build_L_matrix(self, nf, crop=True, giveUf=True):
+        Uf = sparse.vstack([sparse.identity(self.kpi.nbkp) for i in range(nf)])
+        L = (sparse.identity(Uf.shape[0]) - 1/nf * Uf.dot(Uf.T))
+        if crop:
+            L = L[:-self.kpi.nbkp,:]
+        if giveUf:
+            return L, Uf
         else :
-            y = W.dot(kappa.flatten())
-        gstep = self.rhomin
-        gsz = np.round(2 * (self.rhomax/gstep)).astype(np.int16)
-        if dtheta is not None:
-            cmap, norm, rhos, thetas = self.cpu_sadk_binary_match_map(gsz, 
-                                                      gstep, np.array([y]), W=None,deltas=dtheta,
-                                                      cref=1000, full_output=True, project=False)
-        else :
-            cmap, norm, rhos, thetas = self.cpu_sadk_binary_match_map(gsz, 
-                                                      gstep, np.array([kappa]), W=W,deltas=dtheta,
-                                                      cref=1000, full_output=True)
-        cmap = cmap * (rhos<=self.rhomax) * (rhos>=self.rhomin)
-        loc = np.unravel_index(np.nanargmax(cmap),cmap.shape)
+            return L
 
-        startparams = np.array([rhos[loc], thetas[loc], 1000 * 1 / (cmap[loc] /
-                         norm[loc])])
 
-        
-        params = Parameters()
-        params.add("rho", value=startparams[0], min=self.rhomin, max=self.rhomax)
-        params.add("theta", value=startparams[1])
-        params.add("contrast", value=startparams[2])
-        if dtheta is not None:
-            soluce = minimize(self.get_adk_residual,params,
-                            args=(np.array([y]), dtheta),
-                            full_output=True)
+    def get_adk_residual(self, params, y, dtheta):
+        pparams = np.array([np.array([params["rho"],params["theta"],params["contrast"]]) + np.array([0, theta, 0]) for theta in dtheta])
+        kappa = self.get_sadk_signature(pparams, verbose=False)
+        residual = self.Mp.dot(kappa.flatten()) - y
+        return residual
+    def get_kpd_residual(self, params, y, W, wl, dtheta):
+        kappa = self.get_sadk_signature(np.array([params["rho"],params["theta"],params["contrast"]]),
+                                   verbose=False)
+        residual = W.dot(kappa) - y
+        return residual
+
+
+
+
+    def gpu_sadk_binary_match_map(self, gsz, gstep, adk_signalg, W=None,deltas=None,
+                                       verbose=False, project = True, cref=1000, full_output=False,
+                                       thetype=cp.float32):
+        """ Produces a 2D-map showing where the best binary fit occurs
+
+        Computes the dot product between the kp_signal and a grid (x,y) grid of 
+        possible positions for the companion, for a pre-set contrast.
+
+        Parameters:
+        ----------
+        - gsz       : grid size (gsz x gsz)
+        - gstep     : grid step in mas
+        - adk_signalg: a 2d array (cupy) containing the kernel-phase vectors
+        - cref      : reference contrast (optional, default = 1000)
+        - W         : deprecated (cube of whitening matrices) (provide through kpo.Mp (cupy array))
+        - deltas    : An array containing the values of field rotation angles
+        - thetype   : the cupy dtype for the GPU matrices (cp.float64 or cp.float32 recommended)
+        - full_output:False: returns only an array containing the matched filter:
+                      True: returns:
+                              -Array containing the matched filter
+                              -Array of the model norm
+                              -Array of the separation (mas)
+                              -Array of the position angle (deg)
+
+        Remarks:
+        -------
+        In the high-contrast regime, the amplitude of the signature is inversely 
+        proportional to the contrast.
+        ---------------------------------------------------------------
+        """
+        import cupy as cp
+        #A few assertions:
+
+        if W is not None:
+            print("W is not necessary! This function now uses a whitening L matrix kpo.Mp")
+            return 1
+        if deltas.shape[0] != adk_signalg.shape[0]:
+            print("Bad kernel shape")
+            return 1
+        if deltas is None:
+            print("Error: need a rotation angle")
+            return 1
+
+        nf = deltas.shape[0]
+
+        if cp.get_array_module(self.Mp) is not cp:
+            print("This is the GPU version, it wants a cp array!")
+            return 1
+
+
+        #building a grid
+        a = cp.vstack(adk_signalg.flatten())
+        lwadk_signal = self.Mp.dot(a)
+
+        xs, ys = np.meshgrid(np.arange(gsz), np.arange(gsz))
+        ds = np.round(gsz/2)
+        cpform = ((ys-ds)*gstep).flatten() + 1j*((-(xs-ds))*gstep).flatten()
+        rhos, thetas = np.abs(cpform), np.angle(cpform)*180./np.pi
+        thetasdeltas = thetas[:, None] + deltas[None, :]
+        dparams = np.array([np.array([0,deltas[i],0]) for i in range(nf)])
+        params = np.array([rhos, thetas, cref*np.ones_like(rhos)]).T
+
+        #Creating the larger array of parameters for individual observations
+        superparams = params[:, None, :] + dparams[None, :,:]
+        #Retrieving the corresponding model signatures
+        if verbose:
+            print("Getting the model observables")
+            sys.stdout.flush()
+            itparams = tqdm(superparams)
         else:
-            soluce = minimize(self.get_kpd_residual,params,
-                            args=(y, W, self.CWAVEL,dtheta),
-                            full_output=True)
-        #paramshat = np.array([soluce.params["rho"],
-        #                     soluce.params["theta"],
-        #                     soluce.params["contrast"]])
-        paramshat = soluce.params
-        
-        if showmap:
-            hs =  gsz/2*gstep
-            plt.figure()
-            plt.imshow(cmap, cmap=vdg, extent=[-hs,+hs,-hs,+hs])
-            plt.scatter(-params["rho"].value*np.sin(params["theta"].value*np.pi/180),
-                       +params["rho"].value*np.cos(params["theta"].value*np.pi/180),
-                        marker="x", c="w", s=200)
-            plt.scatter(-paramshat["rho"].value*np.sin(paramshat["theta"].value*np.pi/180),
-                       +paramshat["rho"].value*np.cos(paramshat["theta"].value*np.pi/180),
-                        marker="+", c="r", s=200)
-            plt.title("cmap")
-            plt.show()
-            #plt.figure()
-            #plt.imshow(1 * (rhos<=self.rhomax))
-            #plt.colorbar()
-            #plt.title("rhos")
-            #plt.show()
-            #print("cmap",cmap.shape)
-            #print("norm",norm.shape)
-            #print("rhos",rhos.shape)
-            #print("thetas",thetas.shape)
-            print(startparams)
-            print(np.array([paramshat["rho"].value, paramshat["theta"].value, paramshat["contrast"].value]))
-            
-        if dtheta is not None:
-            pphat = np.array([[paramshat["rho"], paramshat["theta"] + atheta, paramshat["contrast"]] for atheta in dtheta])
-            xhat = W.dot(get_sadk_signature(self,
-                   pphat, verbose=False).flatten())
+            itparams = superparams
+        signatures = np.array([self.get_sadk_signature(p, verbose=False) for p in itparams])
+
+        signaturesg = cp.asarray(signatures, dtype=thetype)
+
+        if verbose:
+            print("Projection and reduction")
+            sys.stdout.flush()
+            pixels = tqdm(range(rhos.shape[0]))
+        else:
+            pixels = range(rhos.shape[0])
+        projectedth = []
+        crit = []
+        wsigss = []
+        for pix in pixels:
+            wsigss.append(signaturesg[pix].flatten())
+        wsigss = cp.vstack(wsigss)
+        pixelthproj = self.Mp.dot(wsigss.T)
+        pixnorm = cp.squeeze(cp.linalg.norm(pixelthproj, axis=0))
+        crit = cp.squeeze(pixelthproj.T.dot(lwadk_signal)) / pixnorm
+
+        #print("crit",crit.shape)
+        #print("gsz", gsz)
+        #print("pixelthproj", pixelthproj.shape)
+        if not full_output:
+            return(crit.reshape(gsz, gsz))
+        else :
+            return(cp.asnumpy(crit.reshape(gsz,gsz)), cp.asnumpy(pixnorm.reshape(gsz,gsz)),
+                   rhos.reshape(gsz,gsz), thetas.reshape(gsz,gsz))
+
+
+    def cpu_sadk_binary_match_map(self, gsz, gstep, adk_signal,W=None,deltas=None,
+                                       verbose=False, project=True, cref=1000, full_output=False):
+        """ Produces a 2D-map showing where the best binary fit occurs
+
+        Computes the dot product between the kp_signal and a grid (x,y) grid of 
+        possible positions for the companion, for a pre-set contrast.
+
+        Parameters:
+        ----------
+        - gsz       : grid size (gsz x gsz)
+        - gstep     : grid step in mas
+        - adk_signal: a 2d array containing the kernel-phase vectors
+        - cref      : reference contrast (optional, default = 1000)
+        - W         : a cube of whitening matrices for the data 
+        - deltas    : An array containing the values of field rotation angles
+        - full_output:False: returns only an array containing the matched filter:
+                      True: returns:
+                              -Array containing the matched filter
+                              -Array of the model norm
+                              -Array of the separation (mas)
+                              -Array of the position angle (deg)
+
+        Remarks:
+        -------
+        In the high-contrast regime, the amplitude of the signature is inversely 
+        proportional to the contrast.
+        ---------------------------------------------------------------
+        """
+        #import cupy as cp
+        #A few assertions:
+
+
+        if W is not None:
+            print("W is not necessary! This function now uses a whitening L matrix kpo.Mp")
+            return 1
+    #    if deltas.shape[0] != adk_signal.shape[0]:
+    #        print("Bad kernel shape")
+    #        return 1
+        if deltas is None:
+            print("Error: need a rotation angle")
+            return 1
+
+        nf = deltas.shape[0]
+        L = self.Mp
+
+        a = np.vstack(adk_signal.flatten())
+        if project:
+            if len(self.Mp.shape)==3:
+                np.array([self.Mp[i].dot(adk_signal[i]) for i in range(self.Mp.shape[0])])
+            else:
+                lwadk_signal = self.Mp.dot(a)
         else: 
-            xhat = W.dot(get_kernel_signature(self, np.array([paramshat["rho"], paramshat["theta"], paramshat["contrast"]]) ,
-                                        dtheta, verbose=False))
-        Sglry = xara.Sglr(np.array([y]),xhat)
-    return Sglry, paramshat
+            lwadk_signal = a
 
 
-xara.KPO.global_GLR = global_GLR
-xara.KPO.Sglr_fitandget = Sglr_fitandget
+        #building a grid
+
+        xs, ys = np.meshgrid(np.arange(gsz), np.arange(gsz))
+        ds = np.round(gsz/2)
+        cpform = ((ys-ds)*gstep).flatten() + 1j*((-(xs-ds))*gstep).flatten()
+        rhos, thetas = np.abs(cpform), np.angle(cpform)*180./np.pi
+        thetasdeltas = thetas[:, None] + deltas[None, :]
+        dparams = np.array([np.array([0,deltas[i],0]) for i in range(nf)])
+        params = np.array([rhos, thetas, cref*np.ones_like(rhos)]).T
+
+        #Creating the larger array of parameters for individual observations
+        superparams = params[:, None, :] + dparams[None, :,:]
+        #Retrieving the corresponding model signatures
+        if verbose:
+            print("Getting the model observables")
+            sys.stdout.flush()
+            itparams = tqdm(superparams)
+        else:
+            itparams = superparams
+        signaturesg = np.array([self.get_sadk_signature(p, verbose=False) for p in itparams])
+
+
+        if verbose:
+            print("Projection and reduction")
+            sys.stdout.flush()
+            pixels = tqdm(range(rhos.shape[0]))
+        else:
+            pixels = range(rhos.shape[0])
+        projectedth = []
+        crit = []
+        wsigss = []
+        for pix in pixels:
+            wsigss.append(signaturesg[pix].flatten())
+        wsigss = np.vstack(wsigss)
+        pixelthproj = self.Mp.dot(wsigss.T)
+        pixnorm = cp.squeeze(np.linalg.norm(pixelthproj, axis=0))
+        crit = np.squeeze(pixelthproj.T.dot(lwadk_signal)) / pixnorm
+
+        #print("crit",crit.shape)
+        #print("gsz", gsz)
+        #print("pixelthproj", pixelthproj.shape)
+        #print("lwadk",lwadk_signal.shape)
+        if not full_output:
+            return(crit.reshape(gsz, gsz))
+        else :
+            return(crit.reshape(gsz,gsz), pixnorm.reshape(gsz,gsz),
+                   rhos.reshape(gsz,gsz), thetas.reshape(gsz,gsz))
+        
+    
+
+
+
+
+
+    def define_roi(self, verbose=True):
+        """
+        A method that defines the region of interest probed by the kernel model (kpi)
+        Reads values from the kpi object ant writes to:
+
+        self.rhomin (the Inner Working Angle)
+            defined as 0.5 lambda/D (D = longest baseline)
+        self.rhomax (the Outer Working Angle)
+            defined as 0.5 lambda/b (D = shortest baseline)
+
+        returns 
+        resol       : Resolution (number of elements along axis) 
+        gstep       : step of a minimal grid for an exploration map.
+
+        Remark: resol*2 and gstep/2 are recommended for pretty pictures.
+        """
+        lengths = np.sqrt(self.kpi.UVC[:,0]**2 + self.kpi.UVC[:,1]**2)
+        D = np.max(lengths)
+        b = np.min(lengths)
+        if verbose:
+            print("D = ", D)
+            print("b = ", b)
+        self.rhomin = 0.5*self.CWAVEL / D * 180/np.pi * 3600 * 1000
+        self.rhomax = 0.5*self.CWAVEL / b * 180/np.pi * 3600 * 1000
+        gstep = self.rhomin
+        resol = np.round((self.rhomax/gstep) *2).astype(np.int16)
+        return resol, gstep
+
+    def global_GLR(self, signal, W=None, dtheta=None, n=10, N=1000, mode="cmap", verbose=True):
+        """Computes a complete GLR detection test on provided data
+
+        Parameters:
+        ----------
+        signal     : The non whitened calibrated data (if none, use self.KPDT)
+        W          : Deprecated -> use self.Mp instead for post-processing matrix
+        dtheta     : The rotation angle for ADK (if none, consider classical data)
+        n          : When n realizations of the GLR under H0 are obtained above Sglr(y)
+                    the algorithm stops (sufficient statistics)
+        N          : Total number of realizations to do for a positive detection
+
+        Explored space is by default lambda/(2D) to lambda/(2b), the corresponding
+        values are stored to kpo as self.rhomin and self.rhomax.
+
+
+        """
+        if W is None:
+            print("Matrix should be provided in KPO.Mp")
+            try:
+                W = self.Mp
+            except:
+                print("You must provide a covariance matrix")
+                return 1.
+        #Whitening the provided data:
+        y = W.dot(signal.flatten())
+        #First step is to define explored space.
+        resol, gstep = self.define_roi()
+        if verbose:
+            print("rho min",self.rhomin)
+            print("rho max", self.rhomax)
+        #Then we can get the test statistic on our data:
+        Sglry, phat = self.Sglr_fitandget(kappa=signal,W=W,dtheta=dtheta,mode=mode, showmap=verbose)
+        print("The statistcs value Sglrb = %f"%(Sglry))
+        print(phat)
+        #Now we want to evaluate the Pfa (Pvalue) of this result.
+
+        Sglrymc = []
+        n_fp = 0
+        N_done = 0
+        for i in tqdm(np.arange(N)):
+            print("dtheta", dtheta)
+            S, phat = self.Sglr_fitandget(kappa=None,W=W, dtheta=dtheta, mode=mode, showmap=(N_done<10))
+            #print("S shape", S.shape)
+            #print(phat)
+            Sglrymc.append(S)
+            N_done += 1
+            print("Sglr mc = %f"%(S))
+            if S >= Sglry:
+                print("Found a new false positive")
+                n_fp += 1
+            if n_fp >= n:
+                print("Reached %d false positives"%(n))
+                break
+        Sglrymc = np.array(Sglrymc)
+        if n_fp == 0:
+            print("No false positive found")
+            print("Pfa < %f percent"%(100.* 1./N_done))
+        else :
+            print("Found %d false positives"%(n_fp))
+            print("Pfa = %f"%(100. * float(n_fp)/N_done))
+        return Sglry, Sglrymc, phat
+    
+    
+    def Sglr_fitandget(self, kappa=None, W=None, dtheta=None, mode="cmap", showmap="False"):
+        """
+        Method used by global_GLR()
+        Computes the GLRb statistic of a whitened signal
+        Returns the statistc as well as the fitted parameters in the
+        lmfit Parameters format
+
+        Parameters:
+        ----------
+        signal     : The non whitened calibrated data (if none, use self.KPDT)
+        W          : The whitening matrix for theoretical data (if none,
+                    build it from self.kp_cov)
+        dtheta     : The rotation angle for ADK (if none, consider classical data)
+
+
+        Explored space is by default lambda/(2D) - lambda/(2b)
+        """
+        if mode == "cmap":
+            #We build a colinearity map to get a starting point
+            if kappa is None:
+                y = np.random.normal(loc=0.0,scale=1.0,size=(self.Mp.shape[0]))
+            else :
+                y = W.dot(kappa.flatten())
+            gstep = self.rhomin
+            gsz = np.round(2 * (self.rhomax/gstep)).astype(np.int16)
+            if dtheta is not None:
+                cmap, norm, rhos, thetas = self.cpu_sadk_binary_match_map(gsz, 
+                                                          gstep, np.array([y]), W=None,deltas=dtheta,
+                                                          cref=1000, full_output=True, project=False)
+            else :
+                cmap, norm, rhos, thetas = self.cpu_sadk_binary_match_map(gsz, 
+                                                          gstep, np.array([kappa]), W=W,deltas=dtheta,
+                                                          cref=1000, full_output=True)
+            cmap = cmap * (rhos<=self.rhomax) * (rhos>=self.rhomin)
+            loc = np.unravel_index(np.nanargmax(cmap),cmap.shape)
+
+            startparams = np.array([rhos[loc], thetas[loc], 1000 * 1 / (cmap[loc] /
+                             norm[loc])])
+
+
+            params = Parameters()
+            params.add("rho", value=startparams[0], min=self.rhomin, max=self.rhomax)
+            params.add("theta", value=startparams[1])
+            params.add("contrast", value=startparams[2])
+            if dtheta is not None:
+                soluce = minimize(self.get_adk_residual,params,
+                                args=(np.array([y]), dtheta),
+                                full_output=True)
+            else:
+                soluce = minimize(self.get_kpd_residual,params,
+                                args=(y, W, self.CWAVEL,dtheta),
+                                full_output=True)
+            #paramshat = np.array([soluce.params["rho"],
+            #                     soluce.params["theta"],
+            #                     soluce.params["contrast"]])
+            paramshat = soluce.params
+
+            if showmap:
+                hs =  gsz/2*gstep
+                plt.figure()
+                plt.imshow(cmap, cmap=vdg, extent=[-hs,+hs,-hs,+hs])
+                plt.scatter(-params["rho"].value*np.sin(params["theta"].value*np.pi/180),
+                           +params["rho"].value*np.cos(params["theta"].value*np.pi/180),
+                            marker="x", c="w", s=200)
+                plt.scatter(-paramshat["rho"].value*np.sin(paramshat["theta"].value*np.pi/180),
+                           +paramshat["rho"].value*np.cos(paramshat["theta"].value*np.pi/180),
+                            marker="+", c="r", s=200)
+                plt.title("cmap")
+                plt.show()
+                #plt.figure()
+                #plt.imshow(1 * (rhos<=self.rhomax))
+                #plt.colorbar()
+                #plt.title("rhos")
+                #plt.show()
+                #print("cmap",cmap.shape)
+                #print("norm",norm.shape)
+                #print("rhos",rhos.shape)
+                #print("thetas",thetas.shape)
+                print(startparams)
+                print(np.array([paramshat["rho"].value, paramshat["theta"].value, paramshat["contrast"].value]))
+
+            if dtheta is not None:
+                pphat = np.array([[paramshat["rho"], paramshat["theta"] + atheta, paramshat["contrast"]] for atheta in dtheta])
+                xhat = W.dot(self.get_sadk_signature(pphat, verbose=False).flatten())
+            else: 
+                xhat = W.dot(get_kernel_signature(self, np.array([paramshat["rho"], paramshat["theta"], paramshat["contrast"]]) ,
+                                            dtheta, verbose=False))
+            Sglry = Sglr(np.array([y]),xhat)
+        return Sglry, paramshat
+    def create_cov_matrix(self, var_img, ref_img=None, kernel=True,
+                      verbose=False, option="ABS", m2pix=None):
+        ''' -------------------------------------------------------------------
+        generate the covariance matrix for the UV phase.
+
+        For independant noise in the image plane, with a high SNR, the relationship between image and phase can be linearized.
+
+        Parameters:
+        ----------
+        - var_img: a 2D image with variance per pixel
+        - ref_img: optional, a 2D image constituting the nominal reference
+                    for the complex visibility
+        - kernel: weather to compute the kernel phase covariance based on
+                    the phase covariance
+        - m2pix:   Necessary m2pix parameter to compute the F matrix id necessary
+
+        Option:
+        ------
+        This is an ongoing investigation: should the computation involve the
+        model redundancy or the real part of the Fourier transform? In the 
+        latter scenario, should the computation include cross-terms between
+        imaginary and real parts to be more exact?
+        
+        - "RED":  uses the model redundancy vector
+        - "REAL": uses the real part of the FT
+        - "ABS" : computation based on the a visibility modulus
+
+        Note: Covariance matrix can also be computed via MC simulations, if
+        you are unhappy with the current one. See "append_cov_matrix()"
+        ------------------------------------------------------------------- '''
+
+        ISZ = var_img.shape[0]
+        try:
+            test = self.FF # check to avoid recomputing auxilliary arrays!
+
+        except:
+            if m2pix is not None:
+                self.FF = core.compute_DFTM1(self.kpi.UVC, m2pix, ISZ)
+            else:
+                print("Fourier matrix and/or m2pix are not available.")
+                print("Please compute Fourier matrix.")
+                return
+            
+        #The best is to create real and imaginary parts independantly
+        if ref_img is not None:
+            if verbose:
+                print("Using a separate reference for amplitude")
+            ft = self.FF.dot(ref_img.flat)
+        else :
+            ft = self.FF.dot(var_img.flat)
+        
+ 
+        cov_img = diags(var_img.flatten())
+            
+        if option == "RED":
+            if verbose:
+                print("Do not use that: normalization is WIP")
+                B = np.diag(1.0/self.kpi.RED).dot(np.angle(self.FF))
+            
+            
+        if option == "REAL":
+            if verbose:
+                print("Covariance Matrix computed using the real part of FT!")
+            refj = np.real(ft)
+        
+        if option == "ABS":
+            if verbose:
+                print("Covariance Matrix computed using the abs of the FT!")
+            refj = np.abs(ft)
+        
+        
+        B = self.FF.imag / refj[:, None]
+        self.phi_cov = B.dot(cov_img.dot(B.T))
+        if kernel:
+            if verbose:
+                print("Computing the covariance of kernelized observables")
+            self.kappa_cov = self.kpi.KPM.dot(self.phi_cov).dot(self.kpi.KPM.T)
+    
+    
+    def cvis_phase_wedge(self, offset, ysz):
+        dx, dy = offset[0], offset[1]
+        uvc   = self.kpi.UVC * self.M2PIX
+        corr = np.exp(i2pi * uvc.dot(np.array([dx, dy])/float(ysz)))
+        return corr
+
 
 class kpd_fitter(object):
     
@@ -643,15 +734,6 @@ def intro_companion(image, params, pscale, sg_rad=40):
 
 
 
-#Averaging visibilities
-#cubestack = (cviss +np.roll(cviss, -1 ,axis=0) + np.roll(cviss, -2, axis=0)+
-#            +np.roll(cviss, -3 ,axis=0) + np.roll(cviss, -4, axis=0)+ np.roll(cviss, -5, axis=0))/6
-def cvis_phase_wedge(self, offset, ysz):
-    dx, dy = offset[0], offset[1]
-    uvc   = self.kpi.UVC * self.M2PIX
-    corr = np.exp(i2pi * uvc.dot(np.array([dx, dy])/float(ysz)))
-    return corr
-xara.KPO.cvis_phase_wedge = cvis_phase_wedge
 def uvphase_score(akpo, offset, thecvis, ysz, order=2):
     corr = akpo.cvis_phase_wedge(offset, ysz)
     outcvis = thecvis * corr
@@ -680,89 +762,22 @@ def optimize_phase(akpo, phases, imsize):
     return cviscor
 
 
-from scipy.sparse import diags
-
-def create_cov_matrix(self, var_img, ref_img=None, kernel=True,
-                      verbose=False, option="ABS", m2pix=None):
-        ''' -------------------------------------------------------------------
-        generate the covariance matrix for the UV phase.
-
-        For independant noise in the image plane, with a high SNR, the relationship between image and phase can be linearized.
-
-        Parameters:
-        ----------
-        - var_img: a 2D image with variance per pixel
-        - ref_img: optional, a 2D image constituting the nominal reference
-                    for the complex visibility
-        - kernel: weather to compute the kernel phase covariance based on
-                    the phase covariance
-        - m2pix:   Necessary m2pix parameter to compute the F matrix id necessary
-
-        Option:
-        ------
-        This is an ongoing investigation: should the computation involve the
-        model redundancy or the real part of the Fourier transform? In the 
-        latter scenario, should the computation include cross-terms between
-        imaginary and real parts to be more exact?
-        
-        - "RED":  uses the model redundancy vector
-        - "REAL": uses the real part of the FT
-        - "ABS" : computation based on the a visibility modulus
-
-        Note: Covariance matrix can also be computed via MC simulations, if
-        you are unhappy with the current one. See "append_cov_matrix()"
-        ------------------------------------------------------------------- '''
-
-        ISZ = var_img.shape[0]
-        try:
-            test = self.FF # check to avoid recomputing auxilliary arrays!
-
-        except:
-            if m2pix is not None:
-                self.FF = core.compute_DFTM1(self.kpi.UVC, m2pix, ISZ)
-            else:
-                print("Fourier matrix and/or m2pix are not available.")
-                print("Please compute Fourier matrix.")
-                return
-            
-        #The best is to create real and imaginary parts independantly
-        if ref_img is not None:
-            if verbose:
-                print("Using a separate reference for amplitude")
-            ft = self.FF.dot(ref_img.flat)
-        else :
-            ft = self.FF.dot(var_img.flat)
-        
- 
-        cov_img = diags(var_img.flatten())
-            
-        if option == "RED":
-            if verbose:
-                print("Do not use that: normalization is WIP")
-                B = np.diag(1.0/self.kpi.RED).dot(np.angle(self.FF))
-            
-            
-        if option == "REAL":
-            if verbose:
-                print("Covariance Matrix computed using the real part of FT!")
-            refj = np.real(ft)
-        
-        if option == "ABS":
-            if verbose:
-                print("Covariance Matrix computed using the abs of the FT!")
-            refj = np.abs(ft)
-        
-        
-        B = self.FF.imag / refj[:, None]
-        self.phi_cov = B.dot(cov_img.dot(B.T))
-        if kernel:
-            if verbose:
-                print("Computing the covariance of kernelized observables")
-            self.kappa_cov = self.kpi.KPM.dot(self.phi_cov).dot(self.kpi.KPM.T)
-xara.KPO.create_cov_matrix = create_cov_matrix
 
 
-import matplotlib.cm as cm
+
+def Sglr(y, xhat):
+    """
+    A simple function to return the GLRt statistic (Ceau et al. 2019)
+
+    Parameters:
+    ----------
+    y         : The signature to test
+    xhat      : The Maximum Likelihood Estimate signature
+    """
+    St = 2*np.squeeze(y).T.dot(xhat) - xhat.T.dot(xhat)
+    return St
+
+
 def plot_pupil_and_uv(self, xymax=None, figsize=(8,4), plot_redun = False,
                           cmap=cm.gray, ssize=7.5, lw=0, alpha=1.0, marker='o',
                           usesize=False, showminmax=False):
@@ -835,4 +850,5 @@ def plot_pupil_and_uv(self, xymax=None, figsize=(8,4), plot_redun = False,
 
     # =========================================================================
     # =========================================================================
+    
 xara.KPI.plot_pupil_and_uv = plot_pupil_and_uv
