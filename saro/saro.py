@@ -37,6 +37,7 @@ def distance(yy, xx, yx):
     dist = np.sqrt((xx-yx[1])**2 + (yy-yx[0])**2)
     return dist
 
+
 def get_cvis(self, params):
     """
     Just a macro that returns complex visibilities for the parameter
@@ -761,7 +762,7 @@ def create_cov_matrix(self, var_img, ref_img=None, kernel=True,
 xara.KPO.create_cov_matrix = create_cov_matrix
 
 
-
+import matplotlib.cm as cm
 def plot_pupil_and_uv(self, xymax=None, figsize=(8,4), plot_redun = False,
                           cmap=cm.gray, ssize=7.5, lw=0, alpha=1.0, marker='o',
                           usesize=False, showminmax=False):
