@@ -1,4 +1,4 @@
-gpu = True
+gpu = False
 import numpy as np
 if not gpu:
     import numpy as cp
