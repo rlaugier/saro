@@ -1,4 +1,4 @@
-gpu = False
+gpu = True
 import numpy as np
 if not gpu:
     import numpy as cp
@@ -36,6 +36,28 @@ import matplotlib.cm as cm
 The functions uses the wavelength provided by KPO.CWAVEL
 """
 
+
+def super_gauss(xs, ys, x0, y0, w,s=True, o=4):
+    ''' Returns an 2D super-Gaussian function
+    ------------------------------------------
+    Parameters:
+    - (xs, ys) : array size
+    - (x0, y0) : center of the Super-Gaussian
+    - w        : width of the Super-Gaussian 
+    ------------------------------------------ '''
+
+    x = np.outer(np.arange(xs), np.ones(ys))-x0
+    y = np.outer(np.ones(xs), np.arange(ys))-y0
+    if s:
+        dist = np.max(np.array([np.abs(x), np.abs(y)]), axis=0)
+    else:
+        dist = np.sqrt(x**2+y**2)
+        
+    if o is None:
+        gg = 1*(dist<w)
+    else:
+        gg = np.exp(-(dist/w)**o)
+    return gg
 
 # Utility for phase optimization
 def distance(yy, xx, yx):
@@ -520,7 +542,7 @@ class KPO(xara.KPO):
             if showmap:
                 hs =  gsz/2*gstep
                 plt.figure()
-                plt.imshow(cmap, cmap=vdg, extent=[-hs,+hs,-hs,+hs])
+                plt.imshow(cmap, cmap=bo, extent=[-hs,+hs,-hs,+hs])
                 plt.scatter(-params["rho"].value*np.sin(params["theta"].value*np.pi/180),
                            +params["rho"].value*np.cos(params["theta"].value*np.pi/180),
                             marker="x", c="w", s=200)
@@ -586,7 +608,7 @@ class KPO(xara.KPO):
 
         except:
             if m2pix is not None:
-                self.FF = core.compute_DFTM1(self.kpi.UVC, m2pix, ISZ)
+                self.FF = xara.core.compute_DFTM1(self.kpi.UVC, m2pix, ISZ)
             else:
                 print("Fourier matrix and/or m2pix are not available.")
                 print("Please compute Fourier matrix.")
@@ -780,7 +802,7 @@ def Sglr(y, xhat):
 
 def plot_pupil_and_uv(self, xymax=None, figsize=(8,4), plot_redun = False,
                           cmap=cm.gray, ssize=7.5, lw=0, alpha=1.0, marker='o',
-                          usesize=False, showminmax=False):
+                          usesize=False, showminmax=False, dpi=200):
         '''Nice plot of the pupil sampling and matching uv plane.
 
         --------------------------------------------------------------------
@@ -802,7 +824,7 @@ def plot_pupil_and_uv(self, xymax=None, figsize=(8,4), plot_redun = False,
 
         
 
-        f0 = plt.figure(figsize=figsize)
+        f0 = plt.figure(figsize=figsize, dpi=dpi)
         plt.clf()
         ax0 = plt.subplot(121)
 
@@ -812,7 +834,7 @@ def plot_pupil_and_uv(self, xymax=None, figsize=(8,4), plot_redun = False,
                     cmap=cm.gray, alpha=alpha, marker=marker, lw=lw,
                     vmin=0.0, vmax=1.0)
         else:
-            pl0 = ax0.scatter(self.VAC[:,0], self.VAC[:,1], s=s1, c=self.VAC[:,2],
+            ax0.scatter(self.VAC[:,0], self.VAC[:,1], s=s1, c=self.VAC[:,2],
                     cmap=cmap, alpha=alpha, marker=marker, lw=lw,
                     vmin=0.0, vmax=1.0)
         if xymax is None:
