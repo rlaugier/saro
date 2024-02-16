@@ -20,7 +20,7 @@ from xara import fft, ifft, shift
 from . import detection_maps as dmap
 
 
-from lmfit import minimize, Parameters, report_errors, Minimizer
+from lmfit import minimize, Parameters, Minimizer
 
 
 
